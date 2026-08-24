@@ -1,68 +1,654 @@
-<div style="max-width: 420px; margin: 0 auto; padding: 1rem 0; font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;">
-  <h2 style="font-size: 16px; font-weight: 500; margin: 0 0 4px; color: #1B2620;">teste: seu celular consegue escanear?</h2>
-  <p style="font-size: 13px; color: #5F5E5A; margin: 0 0 14px; line-height: 1.5;">
-    isso é só um experimento técnico pra descobrir se dá certo no seu aparelho, dentro do navegador. nada aqui é enviado ou salvo em lugar nenhum.
-  </p>
-  <button id="btnTestar" style="width: 100%; padding: 12px; border-radius: 8px; border: none; background: #1B2620; color: #F5F2E7; font-size: 14px; font-weight: 500; cursor: pointer;">
-    testar câmera
-  </button>
-  <div id="status" style="margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: #F5F2E7; border: 1px solid #CBC5AA; font-size: 13px; color: #1B2620; display: none; line-height: 1.5;"></div>
-  <video id="video" playsinline autoplay muted style="width: 100%; border-radius: 8px; background: #000; display: none; margin-top: 10px;"></video>
-  <div id="resultado" style="margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: #DCE8DF; font-size: 14px; font-weight: 500; color: #1B2620; display: none;"></div>
-</div>
-
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Simplificando as Entregas</title>
+<style>
+  :root {
+    --ink: #1B2620;
+    --paper: #EAE6D6;
+    --paper-light: #F5F2E7;
+    --paper-deep: #DDD8C2;
+    --accent: #DB9A34;
+    --accent-deep: #8F5B14;
+    --line: #CBC5AA;
+    --ok: #4C7A5E;
+    --alert: #AA4530;
+    --alert-light: #F1DCD4;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #app { max-width: 420px; margin: 0 auto; padding: 0 16px 64px; }
+  header { padding: 32px 0 20px; }
+  header .titlerow { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+  header h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+  header p { font-size: 13px; color: var(--accent-deep); opacity: .85; margin: 0; }
+  .tabs { display: flex; border-radius: 10px; padding: 4px; background: var(--paper-deep); margin-bottom: 20px; gap: 2px; }
+  .tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 10px 4px; border-radius: 7px; font-size: 13px; font-weight: 600; border: none; background: transparent; color: var(--ink); opacity: .6; cursor: pointer; font-family: inherit; }
+  .tab.active { background: var(--ink); color: var(--paper-light); opacity: 1; }
+  .card { border-radius: 10px; background: var(--paper-light); border: 1px solid var(--line); }
+  .muted { opacity: .75; }
+  .btn-primary { width: 100%; padding: 13px; border-radius: 10px; font-weight: 600; font-size: 14px; border: none; background: var(--ink); color: var(--paper-light); cursor: pointer; font-family: inherit; }
+  .btn-primary:disabled { opacity: .4; }
+  input, textarea, select { font-family: inherit; }
+  input:focus, textarea:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .rowfield { flex: 1; min-width: 0; background: transparent; border: none; font-size: 14px; padding: 8px; border-radius: 6px; color: var(--ink); }
+  .chip { font-size: 12px; padding: 8px 14px; border-radius: 999px; font-weight: 600; border: 1px solid var(--line); background: var(--paper-light); color: var(--ink); cursor: pointer; font-family: inherit; }
+  .chip.active { background: var(--ink); color: var(--paper-light); border-color: var(--ink); }
+  .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
+  .key { padding: 16px 0; border-radius: 10px; font-size: 22px; font-weight: 600; font-family: "SF Mono", ui-monospace, monospace; border: 1px solid var(--line); background: var(--paper-light); color: var(--ink); cursor: pointer; }
+  .key.aux { font-size: 12px; font-family: inherit; background: var(--paper-deep); border: none; }
+  .key:disabled { opacity: .3; }
+  .result-color { border-radius: 14px; padding: 24px; text-align: center; cursor: pointer; }
+  .result-warn { border-radius: 14px; padding: 16px; text-align: center; font-size: 14px; background: var(--alert-light); color: var(--alert); }
+  .checkbox { width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--line); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .checkbox.done { background: var(--ok); border-color: var(--ok); }
+  .riscado { text-decoration: line-through; opacity: .45; }
+  video { width: 100%; border-radius: 10px; background: #000; margin-top: 12px; }
+  .warn-box { border-radius: 10px; padding: 12px; font-size: 13px; background: var(--alert-light); color: var(--alert); }
+</style>
+</head>
+<body>
+<div id="app"></div>
+ 
 <script>
 (function () {
-  const btn = document.getElementById('btnTestar');
-  const statusEl = document.getElementById('status');
-  const video = document.getElementById('video');
-  const resultadoEl = document.getElementById('resultado');
-  let scanning = false;
-
-  btn.addEventListener('click', async function () {
-    statusEl.style.display = 'block';
-    statusEl.textContent = 'pedindo acesso à câmera...';
-
-    if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
-      statusEl.textContent = 'esse ambiente não expõe acesso à câmera aqui dentro do chat.';
-      return;
+  "use strict";
+ 
+  var CORES_MAPA = {
+    verde: "#3F6B52", azul: "#2E6CA8", vermelho: "#A33528", amarelo: "#A67F1F",
+    laranja: "#B25F26", roxo: "#5F4685", rosa: "#A33E68", marrom: "#5C3F2A",
+    preto: "#242422", cinza: "#6B6960", branco: "#E8E6DC"
+  };
+  var LISTA_CORES = Object.keys(CORES_MAPA);
+  var RUAS_PADRAO = [
+    { nome: "Rua Ator Paulo Gustavo", faixas: [{ inicio: "19", fim: "191", cor: "verde" }] },
+    { nome: "Rua Mariz e Barros", faixas: [] },
+    { nome: "Rua Osvaldo Cruz", faixas: [] },
+    { nome: "Rua Guilherme Greenhalgh", faixas: [] },
+    { nome: "Rua Belisário Augusto", faixas: [] }
+  ];
+ 
+  function normalizar(s) {
+    return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+  }
+  function ordenarNumerico(a, b) {
+    var na = parseInt(a, 10), nb = parseInt(b, 10);
+    var va = isNaN(na) ? Infinity : na, vb = isNaN(nb) ? Infinity : nb;
+    if (va !== vb) return va - vb;
+    return String(a).localeCompare(String(b), "pt-BR");
+  }
+  function corParaHex(nome) { return CORES_MAPA[normalizar(nome)] || "#8F5B14"; }
+  function corTextoParaFundo(nome) { return normalizar(nome) === "branco" ? "#1B2620" : "#F5F2E7"; }
+  function encontrarFaixa(numero, faixas) {
+    var n = parseInt(numero, 10);
+    if (isNaN(n) || !faixas) return null;
+    for (var i = 0; i < faixas.length; i++) {
+      var ini = parseInt(faixas[i].inicio, 10), fim = parseInt(faixas[i].fim, 10);
+      if (!isNaN(ini) && !isNaN(fim) && n >= ini && n <= fim) return faixas[i];
     }
-
-    let stream;
-    try {
-      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
-    } catch (e) {
-      statusEl.textContent = 'não consegui acessar a câmera (permissão negada ou bloqueada pelo ambiente). detalhe técnico: ' + e.message;
-      return;
-    }
-
-    video.srcObject = stream;
-    video.style.display = 'block';
-    btn.style.display = 'none';
-
-    if (!('BarcodeDetector' in window)) {
-      statusEl.textContent = 'a câmera funcionou, mas esse navegador não tem o leitor nativo de código de barras (comum no iphone/safari). dá pra pensar numa alternativa, mas não por esse caminho específico.';
-      return;
-    }
-
-    statusEl.textContent = 'câmera ativa — aponte pra qualquer código de barras ou qr code perto de você pra testar.';
-
-    const detector = new BarcodeDetector();
-    scanning = true;
-    async function tick() {
-      if (!scanning) return;
-      try {
-        const codes = await detector.detect(video);
-        if (codes.length > 0) {
-          resultadoEl.style.display = 'block';
-          resultadoEl.textContent = 'encontrado: ' + codes[0].rawValue + ' (' + codes[0].format + ')';
-        }
-      } catch (e) {
-        // ignora frames sem leitura
+    return null;
+  }
+  function encontrarRuaMapeada(ruaTexto, mapa) {
+    var norm = normalizar(ruaTexto);
+    var m = mapa.find(function (r) { return normalizar(r.nome) === norm; });
+    if (m) return m;
+    m = mapa.find(function (r) { return normalizar(r.nome).length > 2 && norm.indexOf(normalizar(r.nome)) !== -1; });
+    if (m) return m;
+    m = mapa.find(function (r) { return norm.length > 2 && normalizar(r.nome).indexOf(norm) !== -1; });
+    return m || null;
+  }
+  function parseLinhas(texto) {
+    return texto.split("\n").map(function (l) { return l.trim(); }).filter(Boolean).map(function (linha, idx) {
+      var delim = linha.indexOf("\t") !== -1 ? "\t" : ",";
+      var partes = linha.split(delim).map(function (p) { return p.trim(); });
+      if (partes.length < 2 || !partes[0] || !partes[1]) {
+        return { id: "L" + idx + "-" + linha.length, erro: true, raw: linha };
       }
-      requestAnimationFrame(tick);
+      return { id: "L" + idx + "-" + partes[0] + "-" + partes[1] + "-" + idx, rua: partes[0], numero: partes[1], nome: partes[2] || "", codigo: (partes[3] || "").trim(), erro: false };
+    });
+  }
+  function plural(n, s, p) { return n === 1 ? s : p; }
+  function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+ 
+  // ---------- estado ----------
+  var state = {
+    aba: "consultar",
+    mapaRuas: [],
+    textoColado: "",
+    linhasParseadas: null,
+    encontrados: {},
+    ruaConsulta: "",
+    numeroConsulta: "",
+    novoNomeRua: "",
+    novaFaixaPorRua: {},
+    novaFaixaPendente: {},
+    statusCamera: "idle",
+    erroCamera: "",
+    resultadoScan: null
+  };
+ 
+  function carregar(chave, padrao) {
+    try {
+      var v = localStorage.getItem(chave);
+      return v ? JSON.parse(v) : padrao;
+    } catch (e) { return padrao; }
+  }
+  function salvar(chave, valor) {
+    try { localStorage.setItem(chave, JSON.stringify(valor)); } catch (e) { /* ignora */ }
+  }
+  function salvarMapa() { salvar("mapa-ruas", state.mapaRuas); }
+  function salvarSessao() {
+    salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, encontrados: state.encontrados });
+  }
+ 
+  state.mapaRuas = carregar("mapa-ruas", []);
+  var sess = carregar("sessao-atual", null);
+  if (sess) {
+    state.textoColado = sess.texto || "";
+    state.linhasParseadas = sess.linhas || null;
+    state.encontrados = sess.encontrados || {};
+  }
+ 
+  function proximoCodigo() { return ""; } // não usado mais (faixas não têm código sequencial próprio)
+ 
+  function carregarRuasPadrao() {
+    state.mapaRuas = RUAS_PADRAO.map(function (r, i) {
+      return { id: "seed-" + i, nome: r.nome, faixas: r.faixas.map(function (f, j) { return Object.assign({ id: "seed-" + i + "-" + j }, f); }) };
+    });
+    salvarMapa();
+    render();
+  }
+  function adicionarRua() {
+    var nome = (state.novoNomeRua || "").trim();
+    if (!nome) return;
+    state.mapaRuas.push({ id: "R" + Date.now(), nome: nome, faixas: [] });
+    state.novoNomeRua = "";
+    salvarMapa();
+    render();
+  }
+  function removerRua(id) {
+    state.mapaRuas = state.mapaRuas.filter(function (r) { return r.id !== id; });
+    salvarMapa();
+    render();
+  }
+  function adicionarFaixa(ruaId) {
+    var rasc = state.novaFaixaPorRua[ruaId] || {};
+    var inicio = (rasc.inicio || "").trim(), fim = (rasc.fim || "").trim(), cor = rasc.cor || LISTA_CORES[0];
+    if (!inicio || !fim) return;
+    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
+    if (!rua) return;
+    rua.faixas.push({ id: "F" + Date.now(), inicio: inicio, fim: fim, cor: cor });
+    state.novaFaixaPorRua[ruaId] = { inicio: "", fim: "", cor: LISTA_CORES[0] };
+    salvarMapa();
+    render();
+  }
+  function removerFaixa(ruaId, faixaId) {
+    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
+    if (!rua) return;
+    rua.faixas = rua.faixas.filter(function (f) { return f.id !== faixaId; });
+    salvarMapa();
+    render();
+  }
+  function adicionarFaixaPendente(nomeRua) {
+    var rasc = state.novaFaixaPendente[nomeRua] || {};
+    var inicio = (rasc.inicio || "").trim(), fim = (rasc.fim || "").trim(), cor = rasc.cor || LISTA_CORES[0];
+    if (!inicio || !fim) return;
+    var rua = state.mapaRuas.find(function (r) { return normalizar(r.nome) === normalizar(nomeRua); });
+    if (rua) {
+      rua.faixas.push({ id: "F" + Date.now(), inicio: inicio, fim: fim, cor: cor });
+    } else {
+      state.mapaRuas.push({ id: "R" + Date.now(), nome: nomeRua, faixas: [{ id: "F" + Date.now(), inicio: inicio, fim: fim, cor: cor }] });
     }
-    tick();
-  });
+    delete state.novaFaixaPendente[nomeRua];
+    salvarMapa();
+    render();
+  }
+ 
+  function organizarPacotes() {
+    state.linhasParseadas = parseLinhas(state.textoColado);
+    state.encontrados = {};
+    salvarSessao();
+    render();
+  }
+  function ajustarEncontrado(key, max, delta) {
+    var atual = state.encontrados[key] || 0;
+    state.encontrados[key] = Math.max(0, Math.min(max, atual + delta));
+    salvarSessao();
+    render();
+  }
+  function limparSessao() {
+    state.textoColado = ""; state.linhasParseadas = null; state.encontrados = {};
+    salvarSessao();
+    render();
+  }
+ 
+  function calcularResultado() {
+    if (!state.linhasParseadas) return null;
+    var validas = state.linhasParseadas.filter(function (l) { return !l.erro; });
+    var erros = state.linhasParseadas.filter(function (l) { return l.erro; });
+    var naoMapeadas = {};
+    var semFaixaMap = {};
+    var porGrupo = {};
+ 
+    validas.forEach(function (l) {
+      var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
+      if (!ruaMatch) { naoMapeadas[l.rua] = true; return; }
+      var faixaMatch = encontrarFaixa(l.numero, ruaMatch.faixas);
+      if (!faixaMatch) {
+        if (!semFaixaMap[ruaMatch.nome]) semFaixaMap[ruaMatch.nome] = {};
+        semFaixaMap[ruaMatch.nome][l.numero] = true;
+        return;
+      }
+      var key = ruaMatch.id + "|" + faixaMatch.id;
+      if (!porGrupo[key]) porGrupo[key] = { ruaNome: ruaMatch.nome, faixa: faixaMatch, itens: [] };
+      porGrupo[key].itens.push(l);
+    });
+ 
+    var listaGrupos = Object.keys(porGrupo).map(function (k) {
+      var g = porGrupo[k];
+      var porNumero = {};
+      g.itens.forEach(function (item) {
+        if (!porNumero[item.numero]) porNumero[item.numero] = { numero: item.numero, nomes: [], count: 0 };
+        porNumero[item.numero].count++;
+        if (item.nome) porNumero[item.numero].nomes.push(item.nome);
+      });
+      var enderecos = Object.keys(porNumero).map(function (nk) { return porNumero[nk]; })
+        .sort(function (a, b) { return ordenarNumerico(a.numero, b.numero); })
+        .map(function (e) { return Object.assign({ key: g.faixa.id + "|" + e.numero }, e); });
+      return { ruaNome: g.ruaNome, faixa: g.faixa, enderecos: enderecos, total: g.itens.length };
+    }).sort(function (a, b) {
+      var rc = a.ruaNome.localeCompare(b.ruaNome, "pt-BR");
+      return rc !== 0 ? rc : ordenarNumerico(a.faixa.inicio, b.faixa.inicio);
+    });
+ 
+    var semFaixa = Object.keys(semFaixaMap).map(function (rua) { return { rua: rua, numeros: Object.keys(semFaixaMap[rua]) }; });
+ 
+    return { listaGrupos: listaGrupos, naoMapeadas: Object.keys(naoMapeadas), semFaixa: semFaixa, erros: erros };
+  }
+ 
+  // ---------- câmera ----------
+  var streamAtual = null;
+  var ultimoCodigo = { codigo: null, ts: 0 };
+ 
+  function pararCamera() {
+    if (streamAtual) { streamAtual.getTracks().forEach(function (t) { t.stop(); }); streamAtual = null; }
+    state.statusCamera = "idle";
+  }
+ 
+  function processarCodigoLido(codigo) {
+    var agora = Date.now();
+    if (ultimoCodigo.codigo === codigo && agora - ultimoCodigo.ts < 2500) return;
+    ultimoCodigo = { codigo: codigo, ts: agora };
+ 
+    if (!state.linhasParseadas) { state.resultadoScan = { encontrado: false, semLista: true, codigo: codigo }; render(); return; }
+    var linha = state.linhasParseadas.find(function (l) { return !l.erro && l.codigo && l.codigo === codigo; });
+    if (!linha) { state.resultadoScan = { encontrado: false, codigo: codigo }; render(); return; }
+    var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
+    var faixaMatch = ruaMatch ? encontrarFaixa(linha.numero, ruaMatch.faixas) : null;
+    state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, faixa: faixaMatch };
+ 
+    if (faixaMatch) {
+      var resultado = calcularResultado();
+      var grupo = resultado.listaGrupos.find(function (g) { return g.faixa.id === faixaMatch.id; });
+      var endereco = grupo && grupo.enderecos.find(function (e) { return e.numero === linha.numero; });
+      if (endereco) ajustarEncontrado(endereco.key, endereco.count, 1);
+    }
+    render();
+  }
+ 
+  function iniciarCamera() {
+    state.statusCamera = "pedindo"; state.erroCamera = ""; state.resultadoScan = null; render();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      state.statusCamera = "erro"; state.erroCamera = "esse navegador não expõe acesso à câmera aqui."; render(); return;
+    }
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(function (stream) {
+      streamAtual = stream;
+      state.statusCamera = ("BarcodeDetector" in window) ? "ativa" : "sem-suporte";
+      render();
+      var video = document.getElementById("video");
+      if (video) video.srcObject = stream;
+      if (!("BarcodeDetector" in window)) return;
+      var detector = new BarcodeDetector();
+      function tick() {
+        if (!streamAtual) return;
+        var v = document.getElementById("video");
+        if (!v) { requestAnimationFrame(tick); return; }
+        detector.detect(v).then(function (codes) {
+          if (codes.length > 0) processarCodigoLido(codes[0].rawValue);
+        }).catch(function () {});
+        requestAnimationFrame(tick);
+      }
+      tick();
+    }).catch(function (e) {
+      state.statusCamera = "erro";
+      state.erroCamera = "permissão negada ou bloqueada. detalhe técnico: " + e.message;
+      render();
+    });
+  }
+ 
+  // ---------- render ----------
+  function setAba(a) {
+    if (state.aba === "escanear" && a !== "escanear") pararCamera();
+    state.aba = a;
+    render();
+  }
+ 
+  function render() {
+    var app = document.getElementById("app");
+    var html = "";
+ 
+    html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div>' +
+      '<p>rua + n\u00famero \u2192 cor \u00b7 Icara\u00ed, Niter\u00f3i</p></header>';
+ 
+    html += '<div class="tabs">' +
+      tabBtn("consultar", "\u{1F50D} Cor") + tabBtn("escanear", "\u{1F4F7} Scan") +
+      tabBtn("separar", "\u{1F4E6} Hoje") + tabBtn("mapa", "\u{1F4CD} Faixas") + '</div>';
+ 
+    if (state.aba === "consultar") html += renderConsultar();
+    else if (state.aba === "escanear") html += renderEscanear();
+    else if (state.aba === "separar") html += renderSeparar();
+    else if (state.aba === "mapa") html += renderMapa();
+ 
+    app.innerHTML = html;
+ 
+    attachHandlers();
+    if (state.aba === "escanear" && streamAtual) {
+      var v = document.getElementById("video");
+      if (v) v.srcObject = streamAtual;
+    }
+  }
+ 
+  function tabBtn(id, label) {
+    return '<button class="tab' + (state.aba === id ? " active" : "") + '" data-tab="' + id + '">' + label + "</button>";
+  }
+ 
+  function renderConsultar() {
+    if (state.mapaRuas.length === 0) {
+      return '<p class="muted" style="font-size:14px;margin-bottom:16px">Escolha a rua, digite o n\u00famero \u2014 a cor aparece na hora, sem precisar de c\u00e2mera.</p>' +
+        '<div style="text-align:center;padding:40px 0"><p class="muted" style="font-size:14px;margin-bottom:12px">Cadastre suas ruas e faixas na aba "Faixas" primeiro.</p>' +
+        '<button data-action="seed" style="background:none;border:none;color:var(--accent-deep);font-size:12px;text-decoration:underline;cursor:pointer">usar as 5 ruas fixas de Icara\u00ed como ponto de partida</button></div>';
+    }
+    var ruaObj = state.mapaRuas.find(function (r) { return r.id === state.ruaConsulta; });
+    var faixa = ruaObj ? encontrarFaixa(state.numeroConsulta, ruaObj.faixas) : null;
+ 
+    var chips = state.mapaRuas.map(function (r) {
+      return '<button class="chip' + (state.ruaConsulta === r.id ? " active" : "") + '" data-rua="' + r.id + '">' + esc(r.nome) + "</button>";
+    }).join(" ");
+ 
+    var keys = "";
+    ["1", "2", "3", "4", "5", "6", "7", "8", "9"].forEach(function (d) {
+      keys += '<button class="key" data-digito="' + d + '"' + (!state.ruaConsulta ? " disabled" : "") + ">" + d + "</button>";
+    });
+    keys += '<button class="key aux" data-action="limpar-num"' + (!state.ruaConsulta ? " disabled" : "") + ">limpar</button>";
+    keys += '<button class="key" data-digito="0"' + (!state.ruaConsulta ? " disabled" : "") + ">0</button>";
+    keys += '<button class="key aux" data-action="apagar-num"' + (!state.ruaConsulta ? " disabled" : "") + ">\u232B</button>";
+ 
+    var resultadoHtml = "";
+    if (!state.ruaConsulta) {
+      resultadoHtml = '<p class="muted" style="text-align:center;font-size:12px">escolha uma rua acima</p>';
+    } else if (state.numeroConsulta) {
+      if (faixa) {
+        resultadoHtml = '<div class="result-color" data-action="limpar-num" style="background:' + corParaHex(faixa.cor) + '">' +
+          '<p style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin:0 0 4px;color:' + corTextoParaFundo(faixa.cor) + ';opacity:.85">cor \u00b7 toca pra pr\u00f3ximo</p>' +
+          '<p style="font-size:30px;font-weight:700;margin:0 0 4px;color:' + corTextoParaFundo(faixa.cor) + '">' + esc(faixa.cor) + '</p>' +
+          '<p style="font-size:12px;margin:0;color:' + corTextoParaFundo(faixa.cor) + ';opacity:.85">faixa ' + esc(faixa.inicio) + '\u2013' + esc(faixa.fim) + '</p></div>';
+      } else {
+        resultadoHtml = '<div class="result-warn">n\u00ba ' + esc(state.numeroConsulta) + ' n\u00e3o est\u00e1 em nenhuma faixa cadastrada pra essa rua ainda. Adicione uma faixa que cubra esse n\u00famero na aba "Faixas".</div>';
+      }
+    }
+ 
+    return '<p class="muted" style="font-size:14px;margin-bottom:16px">Escolha a rua, digite o n\u00famero \u2014 a cor aparece na hora, sem precisar de c\u00e2mera.</p>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">' + chips + "</div>" +
+      '<input class="card" readonly value="' + esc(state.numeroConsulta) + '" placeholder="n\u00ba" style="width:100%;font-size:34px;font-family:ui-monospace,monospace;text-align:center;padding:16px;margin-bottom:8px;color:var(--ink)" />' +
+      '<div class="keypad">' + keys + "</div>" + resultadoHtml;
+  }
+ 
+  function renderEscanear() {
+    if (!state.linhasParseadas) {
+      return '<div class="warn-box">Carregue a lista do dia na aba "Hoje" primeiro \u2014 agora com uma 4\u00aa coluna pro c\u00f3digo do QR/c\u00f3digo de barras, \u00e9 com ela que o scan vai conciliar.</div>';
+    }
+    var html = "";
+    if (state.statusCamera === "idle") {
+      html += '<button class="btn-primary" data-action="iniciar-camera">\u{1F4F7} iniciar c\u00e2mera</button>';
+    } else if (state.statusCamera === "pedindo") {
+      html += '<p class="muted" style="text-align:center;padding:16px 0">pedindo acesso \u00e0 c\u00e2mera...</p>';
+    } else if (state.statusCamera === "erro") {
+      html += '<div class="warn-box">' + esc(state.erroCamera) + '<p style="margin-top:8px;font-size:12px;opacity:.8">A aba "Cor" j\u00e1 resolve, digitando rua + n\u00famero.</p></div>';
+    } else if (state.statusCamera === "sem-suporte") {
+      html += '<div class="warn-box">A c\u00e2mera ligou, mas esse navegador n\u00e3o tem leitor nativo de QR/c\u00f3digo de barras (comum no iPhone/Safari). Usa a aba "Cor" nesse aparelho.</div>';
+    }
+    html += '<video id="video" playsinline autoplay muted style="display:' + (state.statusCamera === "ativa" ? "block" : "none") + '"></video>';
+ 
+    if (state.resultadoScan) {
+      var r = state.resultadoScan;
+      if (r.encontrado && r.faixa) {
+        html += '<div class="result-color" style="margin-top:12px;background:' + corParaHex(r.faixa.cor) + '">' +
+          '<p style="font-size:11px;font-weight:600;text-transform:uppercase;margin:0 0 4px;color:' + corTextoParaFundo(r.faixa.cor) + ';opacity:.85">cor</p>' +
+          '<p style="font-size:30px;font-weight:700;margin:0 0 4px;color:' + corTextoParaFundo(r.faixa.cor) + '">' + esc(r.faixa.cor) + '</p>' +
+          '<p style="font-size:12px;margin:0;color:' + corTextoParaFundo(r.faixa.cor) + ';opacity:.85">' + esc(r.rua) + ' \u00b7 n\u00ba ' + esc(r.numero) + (r.nome ? " \u00b7 " + esc(r.nome) : "") + '</p></div>';
+      } else if (r.encontrado) {
+        html += '<div class="result-warn" style="margin-top:12px">Achei o pacote (' + esc(r.rua) + ", n\u00ba " + esc(r.numero) + ") mas esse n\u00famero n\u00e3o est\u00e1 em nenhuma faixa cadastrada ainda.</div>";
+      } else {
+        html += '<div class="result-warn" style="margin-top:12px">' + (r.semLista ? "carregue a lista do dia primeiro." : 'c\u00f3digo "' + esc(r.codigo) + '" n\u00e3o encontrado na lista de hoje.') + "</div>";
+      }
+    }
+    return html;
+  }
+ 
+  function renderSeparar() {
+    var html = "";
+    if (!state.linhasParseadas) {
+      html += '<div class="card" style="padding:12px;font-size:12px;line-height:1.5;margin-bottom:12px">' +
+        '<p style="font-weight:600;margin:0 0 4px">Cole 1 pacote por linha:</p>' +
+        '<p style="font-family:ui-monospace,monospace;opacity:.7;margin:2px 0">Rua, N\u00famero, Nome, C\u00f3digo (nome e c\u00f3digo s\u00e3o opcionais)</p>' +
+        '<p style="font-family:ui-monospace,monospace;opacity:.5;margin:2px 0">Rua Mariz e Barros, 501, Anne Elise, 888030883495876</p>' +
+        '<p style="opacity:.7;margin-top:8px">Sem o c\u00f3digo n\u00e3o d\u00e1 pra usar a aba "Scan" depois \u2014 mas "Cor" e "Hoje" funcionam s\u00f3 com rua e n\u00famero.</p></div>' +
+        '<textarea id="textoColado" class="card" rows="10" placeholder="Rua Ator Paulo Gustavo, 72, Jo\u00e3o Silva, 888030883491111' + "\n" + 'Rua Mariz e Barros, 501, Anne Elise, 888030883495555" style="width:100%;font-size:14px;font-family:ui-monospace,monospace;padding:12px;margin-bottom:12px;color:var(--ink)">' + esc(state.textoColado) + "</textarea>" +
+        '<button class="btn-primary" data-action="organizar"' + (!state.textoColado.trim() ? " disabled" : "") + ">Organizar pacotes</button>";
+      return html;
+    }
+ 
+    var resultado = calcularResultado();
+    var totalPacotes = resultado.listaGrupos.reduce(function (s, g) { return s + g.total; }, 0);
+    var totalSeparados = resultado.listaGrupos.reduce(function (s, g) {
+      return s + g.enderecos.reduce(function (s2, e) { return s2 + Math.min(state.encontrados[e.key] || 0, e.count); }, 0);
+    }, 0);
+ 
+    html += '<div class="card" style="padding:10px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:14px">' +
+      "<span><strong>" + totalPacotes + "</strong> " + plural(totalPacotes, "pacote", "pacotes") + " \u00b7 <strong>" + resultado.listaGrupos.length + "</strong> " + plural(resultado.listaGrupos.length, "cor", "cores") + "</span>" +
+      '<span style="color:var(--ok);font-weight:600">' + totalSeparados + "/" + totalPacotes + "</span></div>";
+ 
+    if (resultado.naoMapeadas.length > 0) {
+      html += '<div class="warn-box" style="margin-bottom:12px"><strong>ruas n\u00e3o reconhecidas:</strong> ' + resultado.naoMapeadas.map(esc).join(", ") + ' \u2014 cadastre na aba "Faixas".</div>';
+    }
+ 
+    if (resultado.semFaixa.length > 0) {
+      html += '<div class="warn-box" style="margin-bottom:12px"><p style="font-weight:600;margin:0 0 8px">n\u00fameros fora de qualquer faixa</p>';
+      resultado.semFaixa.forEach(function (s) {
+        var pend = state.novaFaixaPendente[s.rua] || {};
+        html += '<div style="margin-bottom:8px"><p style="font-size:12px;margin:0 0 4px"><strong>' + esc(s.rua) + "</strong>: " + s.numeros.map(esc).join(", ") + "</p>" +
+          '<div style="display:flex;gap:6px;align-items:center">' +
+          '<input data-pend-inicio="' + esc(s.rua) + '" value="' + esc(pend.inicio || "") + '" placeholder="de" style="width:46px;font-size:12px;padding:5px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
+          '<input data-pend-fim="' + esc(s.rua) + '" value="' + esc(pend.fim || "") + '" placeholder="at\u00e9" style="width:46px;font-size:12px;padding:5px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
+          '<select data-pend-cor="' + esc(s.rua) + '" style="flex:1;font-size:12px;padding:5px;border-radius:6px;border:1px solid var(--line)">' +
+          LISTA_CORES.map(function (c) { return '<option value="' + c + '"' + (pend.cor === c ? " selected" : "") + ">" + c + "</option>"; }).join("") +
+          "</select>" +
+          '<button data-action="add-pendente" data-rua="' + esc(s.rua) + '" style="font-size:12px;padding:5px 10px;border-radius:6px;font-weight:600;background:var(--ink);color:var(--paper-light);border:none">Add</button>' +
+          "</div></div>";
+      });
+      html += "</div>";
+    }
+ 
+    resultado.listaGrupos.forEach(function (g) {
+      var separadosNaCaixa = g.enderecos.reduce(function (s, e) { return s + Math.min(state.encontrados[e.key] || 0, e.count); }, 0);
+      html += '<div class="card" style="overflow:hidden;margin-bottom:12px">' +
+        '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:' + corParaHex(g.faixa.cor) + '">' +
+        '<span style="font-size:11px;font-weight:700;border-radius:999px;padding:4px 10px;background:var(--paper-light);color:' + corParaHex(g.faixa.cor) + '">' + esc(g.faixa.cor) + "</span>" +
+        '<span style="font-size:14px;font-weight:600;flex:1;color:' + corTextoParaFundo(g.faixa.cor) + '">' + esc(g.ruaNome) + " \u00b7 " + esc(g.faixa.inicio) + "\u2013" + esc(g.faixa.fim) + "</span>" +
+        '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaFundo(g.faixa.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div><ul style='list-style:none;margin:0;padding:0'>";
+ 
+      g.enderecos.forEach(function (e) {
+        var achados = Math.min(state.encontrados[e.key] || 0, e.count);
+        var completo = achados >= e.count;
+        if (e.count === 1) {
+          html += '<li data-action="toggle-item" data-key="' + e.key + '" data-max="1" data-completo="' + (completo ? "1" : "0") + '" style="display:flex;align-items:center;gap:10px;padding:8px 12px;font-size:14px;border-top:1px solid var(--line);cursor:pointer">' +
+            '<span class="checkbox' + (completo ? " done" : "") + '">' + (completo ? "\u2713" : "") + "</span>" +
+            '<span' + (completo ? ' class="riscado"' : "") + ">n\u00ba " + esc(e.numero) + (e.nomes[0] ? " \u00b7 " + esc(e.nomes[0]) : "") + "</span></li>";
+        } else {
+          html += '<li style="display:flex;align-items:center;gap:10px;padding:8px 12px;font-size:14px;border-top:1px solid var(--line)">' +
+            '<span style="flex:1">n\u00ba ' + esc(e.numero) + '<span style="margin-left:6px;font-size:12px;font-family:ui-monospace,monospace;color:var(--accent-deep)">\u00b7 ' + e.count + " pacotes</span></span>" +
+            '<div style="display:flex;align-items:center;gap:4px">' +
+            '<button data-action="ajustar" data-key="' + e.key + '" data-max="' + e.count + '" data-delta="-1" style="width:26px;height:26px;border-radius:6px;border:1px solid var(--line);background:var(--paper-light)"' + (achados === 0 ? " disabled" : "") + ">\u2212</button>" +
+            '<span style="width:34px;text-align:center;font-family:ui-monospace,monospace;font-size:12px;font-weight:' + (completo ? "700" : "400") + ';color:' + (completo ? "var(--ok)" : "var(--ink)") + '">' + achados + "/" + e.count + "</span>" +
+            '<button data-action="ajustar" data-key="' + e.key + '" data-max="' + e.count + '" data-delta="1" style="width:26px;height:26px;border-radius:6px;border:none;background:' + (completo ? "var(--ok)" : "var(--accent)") + ";color:" + (completo ? "var(--paper-light)" : "var(--ink)") + '"' + (achados >= e.count ? " disabled" : "") + ">+</button>" +
+            "</div></li>";
+        }
+      });
+      html += "</ul></div>";
+    });
+ 
+    html += '<button class="btn-primary" data-action="limpar-sessao" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7;margin-top:4px">\u21BB Limpar e come\u00e7ar novo dia</button>';
+    return html;
+  }
+ 
+  function renderMapa() {
+    var html = '<p class="muted" style="font-size:14px;margin-bottom:16px">Cada rua pode ter v\u00e1rias faixas de n\u00famero, cada uma com sua cor. Cadastre uma vez \u2014 elas quase n\u00e3o mudam.</p>';
+    html += '<div class="card" style="padding:10px;margin-bottom:16px;display:flex;gap:8px">' +
+      '<input id="novoNomeRua" class="rowfield" value="' + esc(state.novoNomeRua) + '" placeholder="Nome da nova rua" />' +
+      '<button data-action="add-rua" style="border-radius:8px;padding:0 14px;background:var(--accent);border:none;font-weight:700">+</button></div>';
+ 
+    if (state.mapaRuas.length === 0) {
+      html += '<div style="text-align:center;padding:40px 0"><p class="muted" style="font-size:14px;margin-bottom:12px">Nenhuma rua cadastrada ainda.</p>' +
+        '<button data-action="seed" style="background:none;border:none;color:var(--accent-deep);font-size:12px;text-decoration:underline;cursor:pointer">usar as 5 ruas fixas de Icara\u00ed como ponto de partida</button></div>';
+      return html;
+    }
+ 
+    state.mapaRuas.forEach(function (r) {
+      var rasc = state.novaFaixaPorRua[r.id] || { inicio: "", fim: "", cor: LISTA_CORES[0] };
+      html += '<div class="card" style="overflow:hidden;margin-bottom:12px">' +
+        '<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--paper-deep)">' +
+        '<span style="flex:1;font-size:14px;font-weight:600">' + esc(r.nome) + "</span>" +
+        '<button data-action="del-rua" data-id="' + r.id + '" style="border:none;background:none;color:var(--alert);opacity:.6;font-size:16px;cursor:pointer">\u{1F5D1}</button></div>';
+ 
+      if (r.faixas.length > 0) {
+        html += "<ul style='list-style:none;margin:0;padding:0'>";
+        r.faixas.forEach(function (f) {
+          html += '<li style="display:flex;align-items:center;gap:10px;padding:8px 12px;font-size:14px;border-top:1px solid var(--line)">' +
+            '<span style="width:16px;height:16px;border-radius:999px;background:' + corParaHex(f.cor) + '"></span>' +
+            '<span style="flex:1">' + esc(f.inicio) + "\u2013" + esc(f.fim) + '<span style="opacity:.6"> \u00b7 ' + esc(f.cor) + "</span></span>" +
+            '<button data-action="del-faixa" data-rua="' + r.id + '" data-faixa="' + f.id + '" style="border:none;background:none;color:var(--alert);opacity:.5;cursor:pointer">\u{1F5D1}</button></li>';
+        });
+        html += "</ul>";
+      }
+ 
+      html += '<div style="display:flex;align-items:center;gap:6px;padding:8px 12px;border-top:1px solid var(--line)">' +
+        '<input data-faixa-inicio="' + r.id + '" value="' + esc(rasc.inicio) + '" placeholder="de" style="width:52px;font-size:12px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
+        '<input data-faixa-fim="' + r.id + '" value="' + esc(rasc.fim) + '" placeholder="at\u00e9" style="width:52px;font-size:12px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
+        '<select data-faixa-cor="' + r.id + '" style="flex:1;font-size:12px;padding:6px;border-radius:6px;border:1px solid var(--line)">' +
+        LISTA_CORES.map(function (c) { return '<option value="' + c + '"' + (rasc.cor === c ? " selected" : "") + ">" + c + "</option>"; }).join("") +
+        "</select>" +
+        '<button data-action="add-faixa" data-rua="' + r.id + '" style="border-radius:6px;padding:6px 10px;background:var(--accent);border:none;font-weight:700">+</button>' +
+        "</div></div>";
+    });
+    return html;
+  }
+ 
+  // ---------- eventos ----------
+  function attachHandlers() {
+    var app = document.getElementById("app");
+ 
+    app.querySelectorAll("[data-tab]").forEach(function (el) {
+      el.onclick = function () { setAba(el.getAttribute("data-tab")); };
+    });
+    var seedBtn = app.querySelector('[data-action="seed"]');
+    if (seedBtn) seedBtn.onclick = carregarRuasPadrao;
+ 
+    // Consultar
+    app.querySelectorAll("[data-rua]").forEach(function (el) {
+      if (el.hasAttribute("data-rua")) el.onclick = function () { state.ruaConsulta = el.getAttribute("data-rua"); state.numeroConsulta = ""; render(); };
+    });
+    app.querySelectorAll("[data-digito]").forEach(function (el) {
+      el.onclick = function () { state.numeroConsulta = (state.numeroConsulta + el.getAttribute("data-digito")).slice(0, 5); render(); };
+    });
+    var limparNum = app.querySelector('[data-action="limpar-num"]');
+    if (limparNum) limparNum.onclick = function () { state.numeroConsulta = ""; render(); };
+    var apagarNum = app.querySelector('[data-action="apagar-num"]');
+    if (apagarNum) apagarNum.onclick = function () { state.numeroConsulta = state.numeroConsulta.slice(0, -1); render(); };
+    var resultColor = app.querySelector(".result-color[data-action='limpar-num']");
+    if (resultColor) resultColor.onclick = function () { state.numeroConsulta = ""; render(); };
+ 
+    // Escanear
+    var iniciarBtn = app.querySelector('[data-action="iniciar-camera"]');
+    if (iniciarBtn) iniciarBtn.onclick = iniciarCamera;
+ 
+    // Separar - textarea
+    var textoEl = document.getElementById("textoColado");
+    if (textoEl) textoEl.oninput = function () { state.textoColado = textoEl.value; var btn = app.querySelector('[data-action="organizar"]'); if (btn) btn.disabled = !state.textoColado.trim(); };
+    var organizarBtn = app.querySelector('[data-action="organizar"]');
+    if (organizarBtn) organizarBtn.onclick = organizarPacotes;
+    var limparSessaoBtn = app.querySelector('[data-action="limpar-sessao"]');
+    if (limparSessaoBtn) limparSessaoBtn.onclick = limparSessao;
+ 
+    app.querySelectorAll('[data-action="toggle-item"]').forEach(function (el) {
+      el.onclick = function () {
+        var completo = el.getAttribute("data-completo") === "1";
+        ajustarEncontrado(el.getAttribute("data-key"), parseInt(el.getAttribute("data-max"), 10), completo ? -1 : 1);
+      };
+    });
+    app.querySelectorAll('[data-action="ajustar"]').forEach(function (el) {
+      el.onclick = function () {
+        ajustarEncontrado(el.getAttribute("data-key"), parseInt(el.getAttribute("data-max"), 10), parseInt(el.getAttribute("data-delta"), 10));
+      };
+    });
+ 
+    app.querySelectorAll("[data-pend-inicio]").forEach(function (el) {
+      el.oninput = function () { var r = el.getAttribute("data-pend-inicio"); state.novaFaixaPendente[r] = Object.assign({}, state.novaFaixaPendente[r], { inicio: el.value.replace(/[^0-9]/g, "") }); };
+    });
+    app.querySelectorAll("[data-pend-fim]").forEach(function (el) {
+      el.oninput = function () { var r = el.getAttribute("data-pend-fim"); state.novaFaixaPendente[r] = Object.assign({}, state.novaFaixaPendente[r], { fim: el.value.replace(/[^0-9]/g, "") }); };
+    });
+    app.querySelectorAll("[data-pend-cor]").forEach(function (el) {
+      el.onchange = function () { var r = el.getAttribute("data-pend-cor"); state.novaFaixaPendente[r] = Object.assign({}, state.novaFaixaPendente[r], { cor: el.value }); };
+    });
+    app.querySelectorAll('[data-action="add-pendente"]').forEach(function (el) {
+      el.onclick = function () { adicionarFaixaPendente(el.getAttribute("data-rua")); };
+    });
+ 
+    // Mapa
+    var novoNomeEl = document.getElementById("novoNomeRua");
+    if (novoNomeEl) novoNomeEl.oninput = function () { state.novoNomeRua = novoNomeEl.value; };
+    var addRuaBtn = app.querySelector('[data-action="add-rua"]');
+    if (addRuaBtn) addRuaBtn.onclick = adicionarRua;
+    app.querySelectorAll('[data-action="del-rua"]').forEach(function (el) {
+      el.onclick = function () { removerRua(el.getAttribute("data-id")); };
+    });
+    app.querySelectorAll('[data-action="del-faixa"]').forEach(function (el) {
+      el.onclick = function () { removerFaixa(el.getAttribute("data-rua"), el.getAttribute("data-faixa")); };
+    });
+    app.querySelectorAll("[data-faixa-inicio]").forEach(function (el) {
+      el.oninput = function () { var r = el.getAttribute("data-faixa-inicio"); state.novaFaixaPorRua[r] = Object.assign({ cor: LISTA_CORES[0] }, state.novaFaixaPorRua[r], { inicio: el.value.replace(/[^0-9]/g, "") }); };
+    });
+    app.querySelectorAll("[data-faixa-fim]").forEach(function (el) {
+      el.oninput = function () { var r = el.getAttribute("data-faixa-fim"); state.novaFaixaPorRua[r] = Object.assign({ cor: LISTA_CORES[0] }, state.novaFaixaPorRua[r], { fim: el.value.replace(/[^0-9]/g, "") }); };
+    });
+    app.querySelectorAll("[data-faixa-cor]").forEach(function (el) {
+      el.onchange = function () { var r = el.getAttribute("data-faixa-cor"); state.novaFaixaPorRua[r] = Object.assign({}, state.novaFaixaPorRua[r], { cor: el.value }); };
+    });
+    app.querySelectorAll('[data-action="add-faixa"]').forEach(function (el) {
+      el.onclick = function () { adicionarFaixa(el.getAttribute("data-rua")); };
+    });
+  }
+ 
+  render();
 })();
 </script>
+</body>
+</html>
