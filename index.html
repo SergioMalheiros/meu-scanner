@@ -68,13 +68,6 @@
     preto: "#242422", cinza: "#6B6960", branco: "#E8E6DC"
   };
   var LISTA_CORES = Object.keys(CORES_MAPA);
-  var RUAS_PADRAO = [
-    { nome: "Rua Ator Paulo Gustavo", faixas: [{ inicio: "19", fim: "191", cor: "verde" }] },
-    { nome: "Rua Mariz e Barros", faixas: [] },
-    { nome: "Rua Osvaldo Cruz", faixas: [] },
-    { nome: "Rua Guilherme Greenhalgh", faixas: [] },
-    { nome: "Rua Belisário Augusto", faixas: [] }
-  ];
  
   function normalizar(s) {
     return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
@@ -120,13 +113,11 @@
  
   // ---------- estado ----------
   var state = {
-    aba: "consultar",
+    aba: "escanear",
     mapaRuas: [],
     textoColado: "",
     linhasParseadas: null,
     encontrados: {},
-    ruaConsulta: "",
-    numeroConsulta: "",
     novoNomeRua: "",
     novaFaixaPorRua: {},
     novaFaixaPendente: {},
@@ -159,13 +150,6 @@
  
   function proximoCodigo() { return ""; } // não usado mais (faixas não têm código sequencial próprio)
  
-  function carregarRuasPadrao() {
-    state.mapaRuas = RUAS_PADRAO.map(function (r, i) {
-      return { id: "seed-" + i, nome: r.nome, faixas: r.faixas.map(function (f, j) { return Object.assign({ id: "seed-" + i + "-" + j }, f); }) };
-    });
-    salvarMapa();
-    render();
-  }
   function adicionarRua() {
     var nome = (state.novoNomeRua || "").trim();
     if (!nome) return;
@@ -348,15 +332,13 @@
     var app = document.getElementById("app");
     var html = "";
  
-    html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div>' +
-      '<p>rua + n\u00famero \u2192 cor \u00b7 Icara\u00ed, Niter\u00f3i</p></header>';
+    html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div></header>';
  
     html += '<div class="tabs">' +
-      tabBtn("consultar", "\u{1F50D} Cor") + tabBtn("escanear", "\u{1F4F7} Scan") +
+      tabBtn("escanear", "\u{1F4F7} Scan") +
       tabBtn("separar", "\u{1F4E6} Hoje") + tabBtn("mapa", "\u{1F4CD} Faixas") + '</div>';
  
-    if (state.aba === "consultar") html += renderConsultar();
-    else if (state.aba === "escanear") html += renderEscanear();
+    if (state.aba === "escanear") html += renderEscanear();
     else if (state.aba === "separar") html += renderSeparar();
     else if (state.aba === "mapa") html += renderMapa();
  
@@ -374,47 +356,6 @@
  
   function tabBtn(id, label) {
     return '<button class="tab' + (state.aba === id ? " active" : "") + '" data-tab="' + id + '">' + label + "</button>";
-  }
- 
-  function renderConsultar() {
-    if (state.mapaRuas.length === 0) {
-      return '<p class="muted" style="font-size:14px;margin-bottom:16px">Escolha a rua, digite o n\u00famero \u2014 a cor aparece na hora, sem precisar de c\u00e2mera.</p>' +
-        '<div style="text-align:center;padding:40px 0"><p class="muted" style="font-size:14px;margin-bottom:12px">Cadastre suas ruas e faixas na aba "Faixas" primeiro.</p>' +
-        '<button data-action="seed" style="background:none;border:none;color:var(--accent-deep);font-size:12px;text-decoration:underline;cursor:pointer">usar as 5 ruas fixas de Icara\u00ed como ponto de partida</button></div>';
-    }
-    var ruaObj = state.mapaRuas.find(function (r) { return r.id === state.ruaConsulta; });
-    var faixa = ruaObj ? encontrarFaixa(state.numeroConsulta, ruaObj.faixas) : null;
- 
-    var chips = state.mapaRuas.map(function (r) {
-      return '<button class="chip' + (state.ruaConsulta === r.id ? " active" : "") + '" data-rua="' + r.id + '">' + esc(r.nome) + "</button>";
-    }).join(" ");
- 
-    var keys = "";
-    ["1", "2", "3", "4", "5", "6", "7", "8", "9"].forEach(function (d) {
-      keys += '<button class="key" data-digito="' + d + '"' + (!state.ruaConsulta ? " disabled" : "") + ">" + d + "</button>";
-    });
-    keys += '<button class="key aux" data-action="limpar-num"' + (!state.ruaConsulta ? " disabled" : "") + ">limpar</button>";
-    keys += '<button class="key" data-digito="0"' + (!state.ruaConsulta ? " disabled" : "") + ">0</button>";
-    keys += '<button class="key aux" data-action="apagar-num"' + (!state.ruaConsulta ? " disabled" : "") + ">\u232B</button>";
- 
-    var resultadoHtml = "";
-    if (!state.ruaConsulta) {
-      resultadoHtml = '<p class="muted" style="text-align:center;font-size:12px">escolha uma rua acima</p>';
-    } else if (state.numeroConsulta) {
-      if (faixa) {
-        resultadoHtml = '<div class="result-color" data-action="limpar-num" style="background:' + corParaHex(faixa.cor) + '">' +
-          '<p style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;margin:0 0 4px;color:' + corTextoParaFundo(faixa.cor) + ';opacity:.85">cor \u00b7 toca pra pr\u00f3ximo</p>' +
-          '<p style="font-size:30px;font-weight:700;margin:0 0 4px;color:' + corTextoParaFundo(faixa.cor) + '">' + esc(faixa.cor) + '</p>' +
-          '<p style="font-size:12px;margin:0;color:' + corTextoParaFundo(faixa.cor) + ';opacity:.85">faixa ' + esc(faixa.inicio) + '\u2013' + esc(faixa.fim) + '</p></div>';
-      } else {
-        resultadoHtml = '<div class="result-warn">n\u00ba ' + esc(state.numeroConsulta) + ' n\u00e3o est\u00e1 em nenhuma faixa cadastrada pra essa rua ainda. Adicione uma faixa que cubra esse n\u00famero na aba "Faixas".</div>';
-      }
-    }
- 
-    return '<p class="muted" style="font-size:14px;margin-bottom:16px">Escolha a rua, digite o n\u00famero \u2014 a cor aparece na hora, sem precisar de c\u00e2mera.</p>' +
-      '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">' + chips + "</div>" +
-      '<input class="card" readonly value="' + esc(state.numeroConsulta) + '" placeholder="n\u00ba" style="width:100%;font-size:34px;font-family:ui-monospace,monospace;text-align:center;padding:16px;margin-bottom:8px;color:var(--ink)" />' +
-      '<div class="keypad">' + keys + "</div>" + resultadoHtml;
   }
  
   function renderEscanear() {
@@ -532,8 +473,7 @@
       '<button data-action="add-rua" style="border-radius:8px;padding:0 14px;background:var(--accent);border:none;font-weight:700">+</button></div>';
  
     if (state.mapaRuas.length === 0) {
-      html += '<div style="text-align:center;padding:40px 0"><p class="muted" style="font-size:14px;margin-bottom:12px">Nenhuma rua cadastrada ainda.</p>' +
-        '<button data-action="seed" style="background:none;border:none;color:var(--accent-deep);font-size:12px;text-decoration:underline;cursor:pointer">usar as 5 ruas fixas de Icara\u00ed como ponto de partida</button></div>';
+      html += '<div style="text-align:center;padding:40px 0"><p class="muted" style="font-size:14px">Nenhuma rua cadastrada ainda. Adicione a primeira acima.</p></div>';
       return html;
     }
  
@@ -574,23 +514,6 @@
     app.querySelectorAll("[data-tab]").forEach(function (el) {
       el.onclick = function () { setAba(el.getAttribute("data-tab")); };
     });
-    var seedBtn = app.querySelector('[data-action="seed"]');
-    if (seedBtn) seedBtn.onclick = carregarRuasPadrao;
- 
-    // Consultar
-    app.querySelectorAll("[data-rua]").forEach(function (el) {
-      if (el.hasAttribute("data-rua")) el.onclick = function () { state.ruaConsulta = el.getAttribute("data-rua"); state.numeroConsulta = ""; render(); };
-    });
-    app.querySelectorAll("[data-digito]").forEach(function (el) {
-      el.onclick = function () { state.numeroConsulta = (state.numeroConsulta + el.getAttribute("data-digito")).slice(0, 5); render(); };
-    });
-    var limparNum = app.querySelector('[data-action="limpar-num"]');
-    if (limparNum) limparNum.onclick = function () { state.numeroConsulta = ""; render(); };
-    var apagarNum = app.querySelector('[data-action="apagar-num"]');
-    if (apagarNum) apagarNum.onclick = function () { state.numeroConsulta = state.numeroConsulta.slice(0, -1); render(); };
-    var resultColor = app.querySelector(".result-color[data-action='limpar-num']");
-    if (resultColor) resultColor.onclick = function () { state.numeroConsulta = ""; render(); };
- 
     // Escanear
     var iniciarBtn = app.querySelector('[data-action="iniciar-camera"]');
     if (iniciarBtn) iniciarBtn.onclick = iniciarCamera;
