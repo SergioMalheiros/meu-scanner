@@ -29,7 +29,6 @@
   header { padding: 32px 0 20px; }
   header .titlerow { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
   header h1 { font-size: 20px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
-  header p { font-size: 13px; color: var(--accent-deep); opacity: .85; margin: 0; }
   .tabs { display: flex; border-radius: 10px; padding: 4px; background: var(--paper-deep); margin-bottom: 20px; gap: 2px; }
   .tab { flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 10px 4px; border-radius: 7px; font-size: 13px; font-weight: 600; border: none; background: transparent; color: var(--ink); opacity: .6; cursor: pointer; font-family: inherit; }
   .tab.active { background: var(--ink); color: var(--paper-light); opacity: 1; }
@@ -39,20 +38,15 @@
   .btn-primary:disabled { opacity: .4; }
   input, textarea, select { font-family: inherit; }
   input:focus, textarea:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-  .rowfield { flex: 1; min-width: 0; background: transparent; border: none; font-size: 14px; padding: 8px; border-radius: 6px; color: var(--ink); }
-  .chip { font-size: 12px; padding: 8px 14px; border-radius: 999px; font-weight: 600; border: 1px solid var(--line); background: var(--paper-light); color: var(--ink); cursor: pointer; font-family: inherit; }
-  .chip.active { background: var(--ink); color: var(--paper-light); border-color: var(--ink); }
-  .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 16px; }
-  .key { padding: 16px 0; border-radius: 10px; font-size: 22px; font-weight: 600; font-family: "SF Mono", ui-monospace, monospace; border: 1px solid var(--line); background: var(--paper-light); color: var(--ink); cursor: pointer; }
-  .key.aux { font-size: 12px; font-family: inherit; background: var(--paper-deep); border: none; }
-  .key:disabled { opacity: .3; }
-  .result-color { border-radius: 14px; padding: 24px; text-align: center; cursor: pointer; }
+  .result-color { border-radius: 14px; padding: 28px 20px; text-align: center; }
   .result-warn { border-radius: 14px; padding: 16px; text-align: center; font-size: 14px; background: var(--alert-light); color: var(--alert); }
   .checkbox { width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--line); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
   .checkbox.done { background: var(--ok); border-color: var(--ok); }
   .riscado { text-decoration: line-through; opacity: .45; }
   video { width: 100%; min-height: 240px; object-fit: cover; border-radius: 10px; background: #000; margin-top: 12px; }
   .warn-box { border-radius: 10px; padding: 12px; font-size: 13px; background: var(--alert-light); color: var(--alert); }
+  .colorpick-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; font-size: 13px; }
+  .colorpick-row input[type=color] { width: 40px; height: 32px; border-radius: 8px; border: 1px solid var(--line); padding: 2px; background: none; cursor: pointer; }
 </style>
 </head>
 <body>
@@ -62,12 +56,9 @@
 (function () {
   "use strict";
 
-  var CORES_MAPA = {
-    verde: "#3F6B52", azul: "#2E6CA8", vermelho: "#A33528", amarelo: "#A67F1F",
-    laranja: "#B25F26", roxo: "#5F4685", rosa: "#A33E68", marrom: "#5C3F2A",
-    preto: "#242422", cinza: "#6B6960", branco: "#E8E6DC"
-  };
-  var LISTA_CORES = Object.keys(CORES_MAPA);
+  function coresPadrao() {
+    return { par1: "#1F4E79", par2: "#5B9BD5", impar1: "#8C4A1E", impar2: "#D98A4A" };
+  }
 
   function normalizar(s) {
     return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
@@ -78,36 +69,30 @@
     if (va !== vb) return va - vb;
     return String(a).localeCompare(String(b), "pt-BR");
   }
-  function corParaHex(nome) { return CORES_MAPA[normalizar(nome)] || "#8F5B14"; }
-  function corTextoParaFundo(nome) { return normalizar(nome) === "branco" ? "#1B2620" : "#F5F2E7"; }
-  function classificarParImpar(numero, ruaObj) {
+  function corTextoParaHex(hex) {
+    hex = (hex || "#8F5B14").replace("#", "");
+    if (hex.length !== 6) return "#F5F2E7";
+    var r = parseInt(hex.substr(0, 2), 16), g = parseInt(hex.substr(2, 2), 16), b = parseInt(hex.substr(4, 2), 16);
+    var luminancia = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    return luminancia > 0.6 ? "#1B2620" : "#F5F2E7";
+  }
+  function classificar(numero, ruaObj) {
     var n = parseInt(numero, 10);
     if (isNaN(n)) return null;
     var par = (n % 2 === 0);
+    var cores = (ruaObj && ruaObj.cores) || coresPadrao();
     var fc = ruaObj && ruaObj.faixaCompleta;
     if (fc && fc.inicio && fc.fim) {
       var ini = parseInt(fc.inicio, 10), fim = parseInt(fc.fim, 10);
       if (!isNaN(ini) && !isNaN(fim) && fim > ini) {
         var meio = (ini + fim) / 2;
         var primeira = n <= meio;
-        if (par && primeira) return { label: "PAR", sub: "1\u00aa metade (" + ini + "\u2013" + Math.floor(meio) + ")", cor: "#1F4E79", texto: "#F5F2E7" };
-        if (par) return { label: "PAR", sub: "2\u00aa metade (" + Math.ceil(meio + 1) + "\u2013" + fim + ")", cor: "#5B9BD5", texto: "#1B2620" };
-        if (primeira) return { label: "\u00cdMPAR", sub: "1\u00aa metade (" + ini + "\u2013" + Math.floor(meio) + ")", cor: "#8C4A1E", texto: "#F5F2E7" };
-        return { label: "\u00cdMPAR", sub: "2\u00aa metade (" + Math.ceil(meio + 1) + "\u2013" + fim + ")", cor: "#D98A4A", texto: "#1B2620" };
+        var cor4 = par ? (primeira ? cores.par1 : cores.par2) : (primeira ? cores.impar1 : cores.impar2);
+        return { label: par ? "PAR" : "\u00cdMPAR", cor: cor4 };
       }
     }
-    return par
-      ? { label: "PAR", sub: null, cor: corParaHex("azul"), texto: "#F5F2E7" }
-      : { label: "\u00cdMPAR", sub: null, cor: corParaHex("laranja"), texto: "#F5F2E7" };
-  }
-  function encontrarFaixa(numero, faixas) {
-    var n = parseInt(numero, 10);
-    if (isNaN(n) || !faixas) return null;
-    for (var i = 0; i < faixas.length; i++) {
-      var ini = parseInt(faixas[i].inicio, 10), fim = parseInt(faixas[i].fim, 10);
-      if (!isNaN(ini) && !isNaN(fim) && n >= ini && n <= fim) return faixas[i];
-    }
-    return null;
+    var corSimples = par ? cores.par1 : cores.impar1;
+    return { label: par ? "PAR" : "\u00cdMPAR", cor: corSimples };
   }
   function encontrarRuaMapeada(ruaTexto, mapa) {
     var norm = normalizar(ruaTexto);
@@ -139,19 +124,14 @@
     linhasParseadas: null,
     encontrados: {},
     novoNomeRua: "",
-    novaFaixaPorRua: {},
     novaFaixaCompleta: {},
-    novaFaixaPendente: {},
     statusCamera: "idle",
     erroCamera: "",
     resultadoScan: null
   };
 
   function carregar(chave, padrao) {
-    try {
-      var v = localStorage.getItem(chave);
-      return v ? JSON.parse(v) : padrao;
-    } catch (e) { return padrao; }
+    try { var v = localStorage.getItem(chave); return v ? JSON.parse(v) : padrao; } catch (e) { return padrao; }
   }
   function salvar(chave, valor) {
     try { localStorage.setItem(chave, JSON.stringify(valor)); } catch (e) { /* ignora */ }
@@ -161,7 +141,9 @@
     salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, encontrados: state.encontrados });
   }
 
-  state.mapaRuas = carregar("mapa-ruas", []);
+  state.mapaRuas = carregar("mapa-ruas", []).map(function (r) {
+    return Object.assign({ cores: coresPadrao() }, r, { cores: r.cores || coresPadrao() });
+  });
   var sess = carregar("sessao-atual", null);
   if (sess) {
     state.textoColado = sess.texto || "";
@@ -169,36 +151,16 @@
     state.encontrados = sess.encontrados || {};
   }
 
-  function proximoCodigo() { return ""; } // não usado mais (faixas não têm código sequencial próprio)
-
   function adicionarRua() {
     var nome = (state.novoNomeRua || "").trim();
     if (!nome) return;
-    state.mapaRuas.push({ id: "R" + Date.now(), nome: nome, faixas: [] });
+    state.mapaRuas.push({ id: "R" + Date.now(), nome: nome, cores: coresPadrao() });
     state.novoNomeRua = "";
     salvarMapa();
     render();
   }
   function removerRua(id) {
     state.mapaRuas = state.mapaRuas.filter(function (r) { return r.id !== id; });
-    salvarMapa();
-    render();
-  }
-  function adicionarFaixa(ruaId) {
-    var rasc = state.novaFaixaPorRua[ruaId] || {};
-    var inicio = (rasc.inicio || "").trim(), fim = (rasc.fim || "").trim(), cor = rasc.cor || LISTA_CORES[0];
-    if (!inicio || !fim) return;
-    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
-    if (!rua) return;
-    rua.faixas.push({ id: "F" + Date.now(), inicio: inicio, fim: fim, cor: cor });
-    state.novaFaixaPorRua[ruaId] = { inicio: "", fim: "", cor: LISTA_CORES[0] };
-    salvarMapa();
-    render();
-  }
-  function removerFaixa(ruaId, faixaId) {
-    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
-    if (!rua) return;
-    rua.faixas = rua.faixas.filter(function (f) { return f.id !== faixaId; });
     salvarMapa();
     render();
   }
@@ -219,17 +181,11 @@
     salvarMapa();
     render();
   }
-  function adicionarFaixaPendente(nomeRua) {
-    var rasc = state.novaFaixaPendente[nomeRua] || {};
-    var inicio = (rasc.inicio || "").trim(), fim = (rasc.fim || "").trim(), cor = rasc.cor || LISTA_CORES[0];
-    if (!inicio || !fim) return;
-    var rua = state.mapaRuas.find(function (r) { return normalizar(r.nome) === normalizar(nomeRua); });
-    if (rua) {
-      rua.faixas.push({ id: "F" + Date.now(), inicio: inicio, fim: fim, cor: cor });
-    } else {
-      state.mapaRuas.push({ id: "R" + Date.now(), nome: nomeRua, faixas: [{ id: "F" + Date.now(), inicio: inicio, fim: fim, cor: cor }] });
-    }
-    delete state.novaFaixaPendente[nomeRua];
+  function definirCor(ruaId, campo, hex) {
+    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
+    if (!rua) return;
+    if (!rua.cores) rua.cores = coresPadrao();
+    rua.cores[campo] = hex;
     salvarMapa();
     render();
   }
@@ -257,20 +213,14 @@
     var validas = state.linhasParseadas.filter(function (l) { return !l.erro; });
     var erros = state.linhasParseadas.filter(function (l) { return l.erro; });
     var naoMapeadas = {};
-    var semFaixaMap = {};
     var porGrupo = {};
 
     validas.forEach(function (l) {
       var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
       if (!ruaMatch) { naoMapeadas[l.rua] = true; return; }
-      var faixaMatch = encontrarFaixa(l.numero, ruaMatch.faixas);
-      if (!faixaMatch) {
-        if (!semFaixaMap[ruaMatch.nome]) semFaixaMap[ruaMatch.nome] = {};
-        semFaixaMap[ruaMatch.nome][l.numero] = true;
-        return;
-      }
-      var key = ruaMatch.id + "|" + faixaMatch.id;
-      if (!porGrupo[key]) porGrupo[key] = { ruaNome: ruaMatch.nome, faixa: faixaMatch, itens: [] };
+      var c = classificar(l.numero, ruaMatch);
+      var key = ruaMatch.id + "|" + c.cor;
+      if (!porGrupo[key]) porGrupo[key] = { ruaNome: ruaMatch.nome, label: c.label, cor: c.cor, itens: [] };
       porGrupo[key].itens.push(l);
     });
 
@@ -284,16 +234,14 @@
       });
       var enderecos = Object.keys(porNumero).map(function (nk) { return porNumero[nk]; })
         .sort(function (a, b) { return ordenarNumerico(a.numero, b.numero); })
-        .map(function (e) { return Object.assign({ key: g.faixa.id + "|" + e.numero }, e); });
-      return { ruaNome: g.ruaNome, faixa: g.faixa, enderecos: enderecos, total: g.itens.length };
+        .map(function (e) { return Object.assign({ key: k + "|" + e.numero }, e); });
+      return { ruaNome: g.ruaNome, label: g.label, cor: g.cor, enderecos: enderecos, total: g.itens.length };
     }).sort(function (a, b) {
       var rc = a.ruaNome.localeCompare(b.ruaNome, "pt-BR");
-      return rc !== 0 ? rc : ordenarNumerico(a.faixa.inicio, b.faixa.inicio);
+      return rc !== 0 ? rc : a.cor.localeCompare(b.cor);
     });
 
-    var semFaixa = Object.keys(semFaixaMap).map(function (rua) { return { rua: rua, numeros: Object.keys(semFaixaMap[rua]) }; });
-
-    return { listaGrupos: listaGrupos, naoMapeadas: Object.keys(naoMapeadas), semFaixa: semFaixa, erros: erros };
+    return { listaGrupos: listaGrupos, naoMapeadas: Object.keys(naoMapeadas), erros: erros };
   }
 
   // ---------- câmera ----------
@@ -310,24 +258,17 @@
     if (ultimoCodigo.codigo === codigo && agora - ultimoCodigo.ts < 2500) return;
     ultimoCodigo = { codigo: codigo, ts: agora };
 
-    if (!state.linhasParseadas) { state.resultadoScan = { tipo: "vazio", encontrado: false, semLista: true, codigo: codigo }; render(); return; }
+    if (!state.linhasParseadas) { state.resultadoScan = { encontrado: false, semLista: true, codigo: codigo }; render(); return; }
     var linha = state.linhasParseadas.find(function (l) { return !l.erro && l.codigo && l.codigo === codigo; });
-    if (!linha) { state.resultadoScan = { tipo: "vazio", encontrado: false, codigo: codigo }; render(); return; }
-
-    if (state.aba === "parimpar") {
-      var ruaMatchPI = encontrarRuaMapeada(linha.rua, state.mapaRuas);
-      state.resultadoScan = { tipo: "parimpar", encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, classificacao: classificarParImpar(linha.numero, ruaMatchPI) };
-      render();
-      return;
-    }
+    if (!linha) { state.resultadoScan = { encontrado: false, codigo: codigo }; render(); return; }
 
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
-    var faixaMatch = ruaMatch ? encontrarFaixa(linha.numero, ruaMatch.faixas) : null;
-    state.resultadoScan = { tipo: "cor", encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, faixa: faixaMatch };
+    var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch) : null;
+    state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, classificacao: classificacao };
 
-    if (faixaMatch) {
+    if (classificacao) {
       var resultado = calcularResultado();
-      var grupo = resultado.listaGrupos.find(function (g) { return g.faixa.id === faixaMatch.id; });
+      var grupo = resultado.listaGrupos.find(function (g) { return g.ruaNome === (ruaMatch ? ruaMatch.nome : null) && g.cor === classificacao.cor; });
       var endereco = grupo && grupo.enderecos.find(function (e) { return e.numero === linha.numero; });
       if (endereco) ajustarEncontrado(endereco.key, endereco.count, 1);
     }
@@ -346,7 +287,7 @@
       var video = document.getElementById("video");
       if (video) {
         video.srcObject = stream;
-        video.play().catch(function () { /* alguns navegadores exigem toque; ignora aqui */ });
+        video.play().catch(function () {});
       }
       if (!("BarcodeDetector" in window)) return;
       var detector = new BarcodeDetector();
@@ -368,7 +309,6 @@
   }
 
   // ---------- render ----------
-  var ABAS_COM_CAMERA = ["escanear", "parimpar"];
   function setAba(a) {
     if (state.aba !== a) {
       if (streamAtual) pararCamera();
@@ -385,18 +325,17 @@
     html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div></header>';
 
     html += '<div class="tabs">' +
-      tabBtn("escanear", "\u{1F4F7} Scan") + tabBtn("parimpar", "\u2696\uFE0F P/\u00cd") +
+      tabBtn("escanear", "\u{1F4F7} C\u00e2mera") +
       tabBtn("separar", "\u{1F4E6} Hoje") + tabBtn("mapa", "\u{1F4CD} Faixas") + '</div>';
 
-    if (state.aba === "escanear") html += renderEscanear();
-    else if (state.aba === "parimpar") html += renderParImpar();
+    if (state.aba === "escanear") html += renderCamera();
     else if (state.aba === "separar") html += renderSeparar();
     else if (state.aba === "mapa") html += renderMapa();
 
     app.innerHTML = html;
 
     attachHandlers();
-    if (ABAS_COM_CAMERA.indexOf(state.aba) !== -1 && streamAtual) {
+    if (state.aba === "escanear" && streamAtual) {
       var v2 = document.getElementById("video");
       if (v2 && v2.srcObject !== streamAtual) {
         v2.srcObject = streamAtual;
@@ -409,43 +348,11 @@
     return '<button class="tab' + (state.aba === id ? " active" : "") + '" data-tab="' + id + '">' + label + "</button>";
   }
 
-  function renderEscanear() {
+  function renderCamera() {
     if (!state.linhasParseadas) {
-      return '<div class="warn-box">Carregue a lista do dia na aba "Hoje" primeiro \u2014 agora com uma 4\u00aa coluna pro c\u00f3digo do QR/c\u00f3digo de barras, \u00e9 com ela que o scan vai conciliar.</div>';
+      return '<div class="warn-box">Carregue a lista do dia na aba "Hoje" primeiro \u2014 \u00e9 dela que vem o n\u00famero de cada pacote.</div>';
     }
     var html = "";
-    if (state.statusCamera === "idle") {
-      html += '<button class="btn-primary" data-action="iniciar-camera">\u{1F4F7} iniciar c\u00e2mera</button>';
-    } else if (state.statusCamera === "pedindo") {
-      html += '<p class="muted" style="text-align:center;padding:16px 0">pedindo acesso \u00e0 c\u00e2mera...</p>';
-    } else if (state.statusCamera === "erro") {
-      html += '<div class="warn-box">' + esc(state.erroCamera) + '<p style="margin-top:8px;font-size:12px;opacity:.8">A aba "Cor" j\u00e1 resolve, digitando rua + n\u00famero.</p></div>';
-    } else if (state.statusCamera === "sem-suporte") {
-      html += '<div class="warn-box">A c\u00e2mera ligou, mas esse navegador n\u00e3o tem leitor nativo de QR/c\u00f3digo de barras (comum no iPhone/Safari). Usa a aba "Cor" nesse aparelho.</div>';
-    }
-    html += '<video id="video" playsinline autoplay muted style="display:' + (state.statusCamera === "ativa" ? "block" : "none") + '"></video>';
-
-    if (state.resultadoScan && state.resultadoScan.tipo !== "parimpar") {
-      var r = state.resultadoScan;
-      if (r.encontrado && r.faixa) {
-        html += '<div class="result-color" style="margin-top:12px;background:' + corParaHex(r.faixa.cor) + '">' +
-          '<p style="font-size:11px;font-weight:600;text-transform:uppercase;margin:0 0 4px;color:' + corTextoParaFundo(r.faixa.cor) + ';opacity:.85">cor</p>' +
-          '<p style="font-size:30px;font-weight:700;margin:0 0 4px;color:' + corTextoParaFundo(r.faixa.cor) + '">' + esc(r.faixa.cor) + '</p>' +
-          '<p style="font-size:12px;margin:0;color:' + corTextoParaFundo(r.faixa.cor) + ';opacity:.85">' + esc(r.rua) + ' \u00b7 n\u00ba ' + esc(r.numero) + (r.nome ? " \u00b7 " + esc(r.nome) : "") + '</p></div>';
-      } else if (r.encontrado) {
-        html += '<div class="result-warn" style="margin-top:12px">Achei o pacote (' + esc(r.rua) + ", n\u00ba " + esc(r.numero) + ") mas esse n\u00famero n\u00e3o est\u00e1 em nenhuma faixa cadastrada ainda.</div>";
-      } else {
-        html += '<div class="result-warn" style="margin-top:12px">' + (r.semLista ? "carregue a lista do dia primeiro." : 'c\u00f3digo "' + esc(r.codigo) + '" n\u00e3o encontrado na lista de hoje.') + "</div>";
-      }
-    }
-    return html;
-  }
-
-  function renderParImpar() {
-    if (!state.linhasParseadas) {
-      return '<div class="warn-box">Carregue a lista do dia na aba "Hoje" primeiro \u2014 \u00e9 dela que o n\u00famero de cada pacote vem pra calcular par ou \u00edmpar.</div>';
-    }
-    var html = '<p class="muted" style="font-size:13px;margin-bottom:12px">Escaneia normalmente \u2014 aqui o resultado \u00e9 s\u00f3 par ou \u00edmpar, pra jogar direto na bolsa certa.</p>';
     if (state.statusCamera === "idle") {
       html += '<button class="btn-primary" data-action="iniciar-camera">\u{1F4F7} iniciar c\u00e2mera</button>';
     } else if (state.statusCamera === "pedindo") {
@@ -457,15 +364,15 @@
     }
     html += '<video id="video" playsinline autoplay muted style="display:' + (state.statusCamera === "ativa" ? "block" : "none") + '"></video>';
 
-    if (state.resultadoScan && state.resultadoScan.tipo === "parimpar") {
+    if (state.resultadoScan) {
       var r = state.resultadoScan;
-      if (r.encontrado) {
+      if (r.encontrado && r.classificacao) {
         var c = r.classificacao;
         html += '<div class="result-color" style="margin-top:12px;background:' + c.cor + '">' +
-          '<p style="font-size:11px;font-weight:600;text-transform:uppercase;margin:0 0 4px;color:' + c.texto + ';opacity:.85">lado</p>' +
-          '<p style="font-size:34px;font-weight:700;margin:0 0 2px;color:' + c.texto + '">' + c.label + '</p>' +
-          (c.sub ? '<p style="font-size:13px;font-weight:600;margin:0 0 6px;color:' + c.texto + '">' + c.sub + '</p>' : '') +
-          '<p style="font-size:12px;margin:0;color:' + c.texto + ';opacity:.85">' + esc(r.rua) + ' \u00b7 n\u00ba ' + esc(r.numero) + (r.nome ? " \u00b7 " + esc(r.nome) : "") + '</p></div>';
+          '<p style="font-size:36px;font-weight:700;margin:0 0 10px;color:' + corTextoParaHex(c.cor) + '">' + c.label + '</p>' +
+          '<p style="font-size:12px;margin:0;color:' + corTextoParaHex(c.cor) + ';opacity:.85">' + esc(r.rua) + ' \u00b7 n\u00ba ' + esc(r.numero) + (r.nome ? " \u00b7 " + esc(r.nome) : "") + '</p></div>';
+      } else if (r.encontrado) {
+        html += '<div class="result-warn" style="margin-top:12px">Achei o pacote (' + esc(r.rua) + ", n\u00ba " + esc(r.numero) + ") mas essa rua n\u00e3o est\u00e1 cadastrada.</div>";
       } else {
         html += '<div class="result-warn" style="margin-top:12px">' + (r.semLista ? "carregue a lista do dia primeiro." : 'c\u00f3digo "' + esc(r.codigo) + '" n\u00e3o encontrado na lista de hoje.') + "</div>";
       }
@@ -479,8 +386,7 @@
       html += '<div class="card" style="padding:12px;font-size:12px;line-height:1.5;margin-bottom:12px">' +
         '<p style="font-weight:600;margin:0 0 4px">Cole 1 pacote por linha:</p>' +
         '<p style="font-family:ui-monospace,monospace;opacity:.7;margin:2px 0">Rua, N\u00famero, Nome, C\u00f3digo (nome e c\u00f3digo s\u00e3o opcionais)</p>' +
-        '<p style="font-family:ui-monospace,monospace;opacity:.5;margin:2px 0">Rua Mariz e Barros, 501, Anne Elise, 888030883495876</p>' +
-        '<p style="opacity:.7;margin-top:8px">Sem o c\u00f3digo n\u00e3o d\u00e1 pra usar a aba "Scan" depois \u2014 mas "Cor" e "Hoje" funcionam s\u00f3 com rua e n\u00famero.</p></div>' +
+        '<p style="font-family:ui-monospace,monospace;opacity:.5;margin:2px 0">Rua Mariz e Barros, 501, Anne Elise, 888030883495876</p></div>' +
         '<textarea id="textoColado" class="card" rows="10" placeholder="Rua Ator Paulo Gustavo, 72, Jo\u00e3o Silva, 888030883491111' + "\n" + 'Rua Mariz e Barros, 501, Anne Elise, 888030883495555" style="width:100%;font-size:14px;font-family:ui-monospace,monospace;padding:12px;margin-bottom:12px;color:var(--ink)">' + esc(state.textoColado) + "</textarea>" +
         '<button class="btn-primary" data-action="organizar"' + (!state.textoColado.trim() ? " disabled" : "") + ">Organizar pacotes</button>";
       return html;
@@ -500,30 +406,17 @@
       html += '<div class="warn-box" style="margin-bottom:12px"><strong>ruas n\u00e3o reconhecidas:</strong> ' + resultado.naoMapeadas.map(esc).join(", ") + ' \u2014 cadastre na aba "Faixas".</div>';
     }
 
-    if (resultado.semFaixa.length > 0) {
-      html += '<div class="warn-box" style="margin-bottom:12px"><p style="font-weight:600;margin:0 0 8px">n\u00fameros fora de qualquer faixa</p>';
-      resultado.semFaixa.forEach(function (s) {
-        var pend = state.novaFaixaPendente[s.rua] || {};
-        html += '<div style="margin-bottom:8px"><p style="font-size:12px;margin:0 0 4px"><strong>' + esc(s.rua) + "</strong>: " + s.numeros.map(esc).join(", ") + "</p>" +
-          '<div style="display:flex;gap:6px;align-items:center">' +
-          '<input data-pend-inicio="' + esc(s.rua) + '" value="' + esc(pend.inicio || "") + '" placeholder="de" style="width:46px;font-size:12px;padding:5px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
-          '<input data-pend-fim="' + esc(s.rua) + '" value="' + esc(pend.fim || "") + '" placeholder="at\u00e9" style="width:46px;font-size:12px;padding:5px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
-          '<select data-pend-cor="' + esc(s.rua) + '" style="flex:1;font-size:12px;padding:5px;border-radius:6px;border:1px solid var(--line)">' +
-          LISTA_CORES.map(function (c) { return '<option value="' + c + '"' + (pend.cor === c ? " selected" : "") + ">" + c + "</option>"; }).join("") +
-          "</select>" +
-          '<button data-action="add-pendente" data-rua="' + esc(s.rua) + '" style="font-size:12px;padding:5px 10px;border-radius:6px;font-weight:600;background:var(--ink);color:var(--paper-light);border:none">Add</button>' +
-          "</div></div>";
-      });
-      html += "</div>";
+    if (resultado.erros.length > 0) {
+      html += '<details class="muted" style="margin-bottom:12px;font-size:12px"><summary style="cursor:pointer">' + resultado.erros.length + " " + plural(resultado.erros.length, "linha n\u00e3o reconhecida", "linhas n\u00e3o reconhecidas") + "</summary><ul style='margin-top:4px;padding-left:18px'>" +
+        resultado.erros.map(function (e) { return "<li style='font-family:ui-monospace,monospace'>" + esc(e.raw) + "</li>"; }).join("") + "</ul></details>";
     }
 
     resultado.listaGrupos.forEach(function (g) {
       var separadosNaCaixa = g.enderecos.reduce(function (s, e) { return s + Math.min(state.encontrados[e.key] || 0, e.count); }, 0);
       html += '<div class="card" style="overflow:hidden;margin-bottom:12px">' +
-        '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:' + corParaHex(g.faixa.cor) + '">' +
-        '<span style="font-size:11px;font-weight:700;border-radius:999px;padding:4px 10px;background:var(--paper-light);color:' + corParaHex(g.faixa.cor) + '">' + esc(g.faixa.cor) + "</span>" +
-        '<span style="font-size:14px;font-weight:600;flex:1;color:' + corTextoParaFundo(g.faixa.cor) + '">' + esc(g.ruaNome) + " \u00b7 " + esc(g.faixa.inicio) + "\u2013" + esc(g.faixa.fim) + "</span>" +
-        '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaFundo(g.faixa.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div><ul style='list-style:none;margin:0;padding:0'>";
+        '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:' + g.cor + '">' +
+        '<span style="font-size:14px;font-weight:700;flex:1;color:' + corTextoParaHex(g.cor) + '">' + g.label + " \u00b7 " + esc(g.ruaNome) + "</span>" +
+        '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaHex(g.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div><ul style='list-style:none;margin:0;padding:0'>";
 
       g.enderecos.forEach(function (e) {
         var achados = Math.min(state.encontrados[e.key] || 0, e.count);
@@ -550,9 +443,9 @@
   }
 
   function renderMapa() {
-    var html = '<p class="muted" style="font-size:14px;margin-bottom:16px">Cada rua pode ter v\u00e1rias faixas de n\u00famero, cada uma com sua cor. Cadastre uma vez \u2014 elas quase n\u00e3o mudam.</p>';
+    var html = '<p class="muted" style="font-size:14px;margin-bottom:16px">Cadastre suas ruas, a faixa completa (se quiser fragmentar) e escolha as cores. Uma vez s\u00f3 \u2014 elas quase n\u00e3o mudam.</p>';
     html += '<div class="card" style="padding:10px;margin-bottom:16px;display:flex;gap:8px">' +
-      '<input id="novoNomeRua" class="rowfield" value="' + esc(state.novoNomeRua) + '" placeholder="Nome da nova rua" />' +
+      '<input id="novoNomeRua" style="flex:1;min-width:0;background:transparent;border:none;font-size:14px;padding:8px;color:var(--ink)" value="' + esc(state.novoNomeRua) + '" placeholder="Nome da nova rua" />' +
       '<button data-action="add-rua" style="border-radius:8px;padding:0 14px;background:var(--accent);border:none;font-weight:700">+</button></div>';
 
     if (state.mapaRuas.length === 0) {
@@ -561,49 +454,45 @@
     }
 
     state.mapaRuas.forEach(function (r) {
-      var rasc = state.novaFaixaPorRua[r.id] || { inicio: "", fim: "", cor: LISTA_CORES[0] };
       var fcRasc = state.novaFaixaCompleta[r.id] || {};
       var fcIni = fcRasc.inicio !== undefined ? fcRasc.inicio : (r.faixaCompleta ? r.faixaCompleta.inicio : "");
       var fcFim = fcRasc.fim !== undefined ? fcRasc.fim : (r.faixaCompleta ? r.faixaCompleta.fim : "");
-      html += '<div class="card" style="overflow:hidden;margin-bottom:12px">' +
+      var cores = r.cores || coresPadrao();
+      var fragmentado = !!(r.faixaCompleta && r.faixaCompleta.inicio && r.faixaCompleta.fim);
+
+      html += '<div class="card" style="overflow:hidden;margin-bottom:14px">' +
         '<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--paper-deep)">' +
         '<span style="flex:1;font-size:14px;font-weight:600">' + esc(r.nome) + "</span>" +
         '<button data-action="del-rua" data-id="' + r.id + '" style="border:none;background:none;color:var(--alert);opacity:.6;font-size:16px;cursor:pointer">\u{1F5D1}</button></div>';
 
       html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
-        '<p style="font-size:11px;font-weight:600;margin:0 0 6px;opacity:.65">FAIXA COMPLETA \u00b7 fragmenta o Par/\u00cdmpar em 2 cores cada</p>' +
+        '<p style="font-size:11px;font-weight:600;margin:0 0 6px;opacity:.65">FAIXA COMPLETA \u00b7 opcional, fragmenta em 4 cores</p>' +
         '<div style="display:flex;align-items:center;gap:6px;font-size:12px">' +
         '<input data-fc-inicio="' + r.id + '" value="' + esc(fcIni) + '" placeholder="de" style="width:52px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
         '<span style="opacity:.6">at\u00e9</span>' +
         '<input data-fc-fim="' + r.id + '" value="' + esc(fcFim) + '" placeholder="at\u00e9" style="width:52px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
         '<button data-action="salvar-fc" data-rua="' + r.id + '" style="padding:6px 10px;border-radius:6px;font-weight:600;background:var(--ink);color:var(--paper-light);border:none">Salvar</button>' +
-        (r.faixaCompleta ? '<button data-action="limpar-fc" data-rua="' + r.id + '" style="padding:6px 9px;border-radius:6px;border:1px solid var(--line);background:none">\u2715</button>' : "") +
-        "</div>" +
-        (r.faixaCompleta ? '<p style="font-size:11px;margin:6px 0 0;opacity:.6">ativo: ' + esc(r.faixaCompleta.inicio) + '\u2013' + esc(r.faixaCompleta.fim) + ' \u2014 4 cores no Par/\u00cdmpar</p>' : '<p style="font-size:11px;margin:6px 0 0;opacity:.5">sem faixa \u2014 Par/\u00cdmpar simples (2 cores)</p>') +
-        "</div>";
-
-      html += '<p style="font-size:11px;font-weight:600;margin:10px 0 0 12px;opacity:.65">CORES POR N\u00daMERO \u00b7 pro Scan</p>';
-      if (r.faixas.length > 0) {
-        html += "<ul style='list-style:none;margin:0;padding:0'>";
-        r.faixas.forEach(function (f) {
-          html += '<li style="display:flex;align-items:center;gap:10px;padding:8px 12px;font-size:14px;border-top:1px solid var(--line)">' +
-            '<span style="width:16px;height:16px;border-radius:999px;background:' + corParaHex(f.cor) + '"></span>' +
-            '<span style="flex:1">' + esc(f.inicio) + "\u2013" + esc(f.fim) + '<span style="opacity:.6"> \u00b7 ' + esc(f.cor) + "</span></span>" +
-            '<button data-action="del-faixa" data-rua="' + r.id + '" data-faixa="' + f.id + '" style="border:none;background:none;color:var(--alert);opacity:.5;cursor:pointer">\u{1F5D1}</button></li>';
-        });
-        html += "</ul>";
-      }
-
-      html += '<div style="display:flex;align-items:center;gap:6px;padding:8px 12px;border-top:1px solid var(--line)">' +
-        '<input data-faixa-inicio="' + r.id + '" value="' + esc(rasc.inicio) + '" placeholder="de" style="width:52px;font-size:12px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
-        '<input data-faixa-fim="' + r.id + '" value="' + esc(rasc.fim) + '" placeholder="at\u00e9" style="width:52px;font-size:12px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
-        '<select data-faixa-cor="' + r.id + '" style="flex:1;font-size:12px;padding:6px;border-radius:6px;border:1px solid var(--line)">' +
-        LISTA_CORES.map(function (c) { return '<option value="' + c + '"' + (rasc.cor === c ? " selected" : "") + ">" + c + "</option>"; }).join("") +
-        "</select>" +
-        '<button data-action="add-faixa" data-rua="' + r.id + '" style="border-radius:6px;padding:6px 10px;background:var(--accent);border:none;font-weight:700">+</button>' +
+        (fragmentado ? '<button data-action="limpar-fc" data-rua="' + r.id + '" style="padding:6px 9px;border-radius:6px;border:1px solid var(--line);background:none">\u2715</button>' : "") +
         "</div></div>";
+
+      html += '<div style="padding:4px 12px 10px;border-top:1px solid var(--line)">' +
+        '<p style="font-size:11px;font-weight:600;margin:8px 0 0;opacity:.65">CORES</p>';
+
+      if (!fragmentado) {
+        html += colorPickRow(r.id, "par1", "PAR", cores.par1) + colorPickRow(r.id, "impar1", "\u00cdMPAR", cores.impar1);
+      } else {
+        html += colorPickRow(r.id, "par1", "PAR \u00b7 1\u00aa metade", cores.par1) +
+          colorPickRow(r.id, "par2", "PAR \u00b7 2\u00aa metade", cores.par2) +
+          colorPickRow(r.id, "impar1", "\u00cdMPAR \u00b7 1\u00aa metade", cores.impar1) +
+          colorPickRow(r.id, "impar2", "\u00cdMPAR \u00b7 2\u00aa metade", cores.impar2);
+      }
+      html += "</div></div>";
     });
     return html;
+  }
+
+  function colorPickRow(ruaId, campo, label, valor) {
+    return '<div class="colorpick-row"><span>' + label + '</span><input type="color" data-cor-rua="' + ruaId + '" data-cor-campo="' + campo + '" value="' + esc(valor) + '" /></div>';
   }
 
   // ---------- eventos ----------
@@ -613,11 +502,10 @@
     app.querySelectorAll("[data-tab]").forEach(function (el) {
       el.onclick = function () { setAba(el.getAttribute("data-tab")); };
     });
-    // Escanear
+
     var iniciarBtn = app.querySelector('[data-action="iniciar-camera"]');
     if (iniciarBtn) iniciarBtn.onclick = iniciarCamera;
 
-    // Separar - textarea
     var textoEl = document.getElementById("textoColado");
     if (textoEl) textoEl.oninput = function () { state.textoColado = textoEl.value; var btn = app.querySelector('[data-action="organizar"]'); if (btn) btn.disabled = !state.textoColado.trim(); };
     var organizarBtn = app.querySelector('[data-action="organizar"]');
@@ -637,41 +525,12 @@
       };
     });
 
-    app.querySelectorAll("[data-pend-inicio]").forEach(function (el) {
-      el.oninput = function () { var r = el.getAttribute("data-pend-inicio"); state.novaFaixaPendente[r] = Object.assign({}, state.novaFaixaPendente[r], { inicio: el.value.replace(/[^0-9]/g, "") }); };
-    });
-    app.querySelectorAll("[data-pend-fim]").forEach(function (el) {
-      el.oninput = function () { var r = el.getAttribute("data-pend-fim"); state.novaFaixaPendente[r] = Object.assign({}, state.novaFaixaPendente[r], { fim: el.value.replace(/[^0-9]/g, "") }); };
-    });
-    app.querySelectorAll("[data-pend-cor]").forEach(function (el) {
-      el.onchange = function () { var r = el.getAttribute("data-pend-cor"); state.novaFaixaPendente[r] = Object.assign({}, state.novaFaixaPendente[r], { cor: el.value }); };
-    });
-    app.querySelectorAll('[data-action="add-pendente"]').forEach(function (el) {
-      el.onclick = function () { adicionarFaixaPendente(el.getAttribute("data-rua")); };
-    });
-
-    // Mapa
     var novoNomeEl = document.getElementById("novoNomeRua");
     if (novoNomeEl) novoNomeEl.oninput = function () { state.novoNomeRua = novoNomeEl.value; };
     var addRuaBtn = app.querySelector('[data-action="add-rua"]');
     if (addRuaBtn) addRuaBtn.onclick = adicionarRua;
     app.querySelectorAll('[data-action="del-rua"]').forEach(function (el) {
       el.onclick = function () { removerRua(el.getAttribute("data-id")); };
-    });
-    app.querySelectorAll('[data-action="del-faixa"]').forEach(function (el) {
-      el.onclick = function () { removerFaixa(el.getAttribute("data-rua"), el.getAttribute("data-faixa")); };
-    });
-    app.querySelectorAll("[data-faixa-inicio]").forEach(function (el) {
-      el.oninput = function () { var r = el.getAttribute("data-faixa-inicio"); state.novaFaixaPorRua[r] = Object.assign({ cor: LISTA_CORES[0] }, state.novaFaixaPorRua[r], { inicio: el.value.replace(/[^0-9]/g, "") }); };
-    });
-    app.querySelectorAll("[data-faixa-fim]").forEach(function (el) {
-      el.oninput = function () { var r = el.getAttribute("data-faixa-fim"); state.novaFaixaPorRua[r] = Object.assign({ cor: LISTA_CORES[0] }, state.novaFaixaPorRua[r], { fim: el.value.replace(/[^0-9]/g, "") }); };
-    });
-    app.querySelectorAll("[data-faixa-cor]").forEach(function (el) {
-      el.onchange = function () { var r = el.getAttribute("data-faixa-cor"); state.novaFaixaPorRua[r] = Object.assign({}, state.novaFaixaPorRua[r], { cor: el.value }); };
-    });
-    app.querySelectorAll('[data-action="add-faixa"]').forEach(function (el) {
-      el.onclick = function () { adicionarFaixa(el.getAttribute("data-rua")); };
     });
     app.querySelectorAll("[data-fc-inicio]").forEach(function (el) {
       el.oninput = function () { var r = el.getAttribute("data-fc-inicio"); state.novaFaixaCompleta[r] = Object.assign({}, state.novaFaixaCompleta[r], { inicio: el.value.replace(/[^0-9]/g, "") }); };
@@ -684,6 +543,9 @@
     });
     app.querySelectorAll('[data-action="limpar-fc"]').forEach(function (el) {
       el.onclick = function () { limparFaixaCompleta(el.getAttribute("data-rua")); };
+    });
+    app.querySelectorAll("[data-cor-rua]").forEach(function (el) {
+      el.onchange = function () { definirCor(el.getAttribute("data-cor-rua"), el.getAttribute("data-cor-campo"), el.value); };
     });
   }
 
