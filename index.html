@@ -57,18 +57,18 @@
 </head>
 <body>
 <div id="app"></div>
- 
+
 <script>
 (function () {
   "use strict";
- 
+
   var CORES_MAPA = {
     verde: "#3F6B52", azul: "#2E6CA8", vermelho: "#A33528", amarelo: "#A67F1F",
     laranja: "#B25F26", roxo: "#5F4685", rosa: "#A33E68", marrom: "#5C3F2A",
     preto: "#242422", cinza: "#6B6960", branco: "#E8E6DC"
   };
   var LISTA_CORES = Object.keys(CORES_MAPA);
- 
+
   function normalizar(s) {
     return (s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
   }
@@ -80,6 +80,26 @@
   }
   function corParaHex(nome) { return CORES_MAPA[normalizar(nome)] || "#8F5B14"; }
   function corTextoParaFundo(nome) { return normalizar(nome) === "branco" ? "#1B2620" : "#F5F2E7"; }
+  function classificarParImpar(numero, ruaObj) {
+    var n = parseInt(numero, 10);
+    if (isNaN(n)) return null;
+    var par = (n % 2 === 0);
+    var fc = ruaObj && ruaObj.faixaCompleta;
+    if (fc && fc.inicio && fc.fim) {
+      var ini = parseInt(fc.inicio, 10), fim = parseInt(fc.fim, 10);
+      if (!isNaN(ini) && !isNaN(fim) && fim > ini) {
+        var meio = (ini + fim) / 2;
+        var primeira = n <= meio;
+        if (par && primeira) return { label: "PAR", sub: "1\u00aa metade (" + ini + "\u2013" + Math.floor(meio) + ")", cor: "#1F4E79", texto: "#F5F2E7" };
+        if (par) return { label: "PAR", sub: "2\u00aa metade (" + Math.ceil(meio + 1) + "\u2013" + fim + ")", cor: "#5B9BD5", texto: "#1B2620" };
+        if (primeira) return { label: "\u00cdMPAR", sub: "1\u00aa metade (" + ini + "\u2013" + Math.floor(meio) + ")", cor: "#8C4A1E", texto: "#F5F2E7" };
+        return { label: "\u00cdMPAR", sub: "2\u00aa metade (" + Math.ceil(meio + 1) + "\u2013" + fim + ")", cor: "#D98A4A", texto: "#1B2620" };
+      }
+    }
+    return par
+      ? { label: "PAR", sub: null, cor: corParaHex("azul"), texto: "#F5F2E7" }
+      : { label: "\u00cdMPAR", sub: null, cor: corParaHex("laranja"), texto: "#F5F2E7" };
+  }
   function encontrarFaixa(numero, faixas) {
     var n = parseInt(numero, 10);
     if (isNaN(n) || !faixas) return null;
@@ -110,7 +130,7 @@
   }
   function plural(n, s, p) { return n === 1 ? s : p; }
   function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
- 
+
   // ---------- estado ----------
   var state = {
     aba: "escanear",
@@ -120,12 +140,13 @@
     encontrados: {},
     novoNomeRua: "",
     novaFaixaPorRua: {},
+    novaFaixaCompleta: {},
     novaFaixaPendente: {},
     statusCamera: "idle",
     erroCamera: "",
     resultadoScan: null
   };
- 
+
   function carregar(chave, padrao) {
     try {
       var v = localStorage.getItem(chave);
@@ -139,7 +160,7 @@
   function salvarSessao() {
     salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, encontrados: state.encontrados });
   }
- 
+
   state.mapaRuas = carregar("mapa-ruas", []);
   var sess = carregar("sessao-atual", null);
   if (sess) {
@@ -147,9 +168,9 @@
     state.linhasParseadas = sess.linhas || null;
     state.encontrados = sess.encontrados || {};
   }
- 
+
   function proximoCodigo() { return ""; } // não usado mais (faixas não têm código sequencial próprio)
- 
+
   function adicionarRua() {
     var nome = (state.novoNomeRua || "").trim();
     if (!nome) return;
@@ -181,6 +202,23 @@
     salvarMapa();
     render();
   }
+  function salvarFaixaCompleta(ruaId) {
+    var rasc = state.novaFaixaCompleta[ruaId] || {};
+    var inicio = (rasc.inicio || "").trim(), fim = (rasc.fim || "").trim();
+    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
+    if (!rua || !inicio || !fim) return;
+    rua.faixaCompleta = { inicio: inicio, fim: fim };
+    salvarMapa();
+    render();
+  }
+  function limparFaixaCompleta(ruaId) {
+    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
+    if (!rua) return;
+    delete rua.faixaCompleta;
+    delete state.novaFaixaCompleta[ruaId];
+    salvarMapa();
+    render();
+  }
   function adicionarFaixaPendente(nomeRua) {
     var rasc = state.novaFaixaPendente[nomeRua] || {};
     var inicio = (rasc.inicio || "").trim(), fim = (rasc.fim || "").trim(), cor = rasc.cor || LISTA_CORES[0];
@@ -195,7 +233,7 @@
     salvarMapa();
     render();
   }
- 
+
   function organizarPacotes() {
     state.linhasParseadas = parseLinhas(state.textoColado);
     state.encontrados = {};
@@ -213,7 +251,7 @@
     salvarSessao();
     render();
   }
- 
+
   function calcularResultado() {
     if (!state.linhasParseadas) return null;
     var validas = state.linhasParseadas.filter(function (l) { return !l.erro; });
@@ -221,7 +259,7 @@
     var naoMapeadas = {};
     var semFaixaMap = {};
     var porGrupo = {};
- 
+
     validas.forEach(function (l) {
       var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
       if (!ruaMatch) { naoMapeadas[l.rua] = true; return; }
@@ -235,7 +273,7 @@
       if (!porGrupo[key]) porGrupo[key] = { ruaNome: ruaMatch.nome, faixa: faixaMatch, itens: [] };
       porGrupo[key].itens.push(l);
     });
- 
+
     var listaGrupos = Object.keys(porGrupo).map(function (k) {
       var g = porGrupo[k];
       var porNumero = {};
@@ -252,33 +290,41 @@
       var rc = a.ruaNome.localeCompare(b.ruaNome, "pt-BR");
       return rc !== 0 ? rc : ordenarNumerico(a.faixa.inicio, b.faixa.inicio);
     });
- 
+
     var semFaixa = Object.keys(semFaixaMap).map(function (rua) { return { rua: rua, numeros: Object.keys(semFaixaMap[rua]) }; });
- 
+
     return { listaGrupos: listaGrupos, naoMapeadas: Object.keys(naoMapeadas), semFaixa: semFaixa, erros: erros };
   }
- 
+
   // ---------- câmera ----------
   var streamAtual = null;
   var ultimoCodigo = { codigo: null, ts: 0 };
- 
+
   function pararCamera() {
     if (streamAtual) { streamAtual.getTracks().forEach(function (t) { t.stop(); }); streamAtual = null; }
     state.statusCamera = "idle";
   }
- 
+
   function processarCodigoLido(codigo) {
     var agora = Date.now();
     if (ultimoCodigo.codigo === codigo && agora - ultimoCodigo.ts < 2500) return;
     ultimoCodigo = { codigo: codigo, ts: agora };
- 
-    if (!state.linhasParseadas) { state.resultadoScan = { encontrado: false, semLista: true, codigo: codigo }; render(); return; }
+
+    if (!state.linhasParseadas) { state.resultadoScan = { tipo: "vazio", encontrado: false, semLista: true, codigo: codigo }; render(); return; }
     var linha = state.linhasParseadas.find(function (l) { return !l.erro && l.codigo && l.codigo === codigo; });
-    if (!linha) { state.resultadoScan = { encontrado: false, codigo: codigo }; render(); return; }
+    if (!linha) { state.resultadoScan = { tipo: "vazio", encontrado: false, codigo: codigo }; render(); return; }
+
+    if (state.aba === "parimpar") {
+      var ruaMatchPI = encontrarRuaMapeada(linha.rua, state.mapaRuas);
+      state.resultadoScan = { tipo: "parimpar", encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, classificacao: classificarParImpar(linha.numero, ruaMatchPI) };
+      render();
+      return;
+    }
+
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
     var faixaMatch = ruaMatch ? encontrarFaixa(linha.numero, ruaMatch.faixas) : null;
-    state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, faixa: faixaMatch };
- 
+    state.resultadoScan = { tipo: "cor", encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, faixa: faixaMatch };
+
     if (faixaMatch) {
       var resultado = calcularResultado();
       var grupo = resultado.listaGrupos.find(function (g) { return g.faixa.id === faixaMatch.id; });
@@ -287,7 +333,7 @@
     }
     render();
   }
- 
+
   function iniciarCamera() {
     state.statusCamera = "pedindo"; state.erroCamera = ""; state.resultadoScan = null; render();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -320,32 +366,37 @@
       render();
     });
   }
- 
+
   // ---------- render ----------
+  var ABAS_COM_CAMERA = ["escanear", "parimpar"];
   function setAba(a) {
-    if (state.aba === "escanear" && a !== "escanear") pararCamera();
+    if (state.aba !== a) {
+      if (streamAtual) pararCamera();
+      state.resultadoScan = null;
+    }
     state.aba = a;
     render();
   }
- 
+
   function render() {
     var app = document.getElementById("app");
     var html = "";
- 
+
     html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div></header>';
- 
+
     html += '<div class="tabs">' +
-      tabBtn("escanear", "\u{1F4F7} Scan") +
+      tabBtn("escanear", "\u{1F4F7} Scan") + tabBtn("parimpar", "\u2696\uFE0F P/\u00cd") +
       tabBtn("separar", "\u{1F4E6} Hoje") + tabBtn("mapa", "\u{1F4CD} Faixas") + '</div>';
- 
+
     if (state.aba === "escanear") html += renderEscanear();
+    else if (state.aba === "parimpar") html += renderParImpar();
     else if (state.aba === "separar") html += renderSeparar();
     else if (state.aba === "mapa") html += renderMapa();
- 
+
     app.innerHTML = html;
- 
+
     attachHandlers();
-    if (state.aba === "escanear" && streamAtual) {
+    if (ABAS_COM_CAMERA.indexOf(state.aba) !== -1 && streamAtual) {
       var v2 = document.getElementById("video");
       if (v2 && v2.srcObject !== streamAtual) {
         v2.srcObject = streamAtual;
@@ -353,11 +404,11 @@
       }
     }
   }
- 
+
   function tabBtn(id, label) {
     return '<button class="tab' + (state.aba === id ? " active" : "") + '" data-tab="' + id + '">' + label + "</button>";
   }
- 
+
   function renderEscanear() {
     if (!state.linhasParseadas) {
       return '<div class="warn-box">Carregue a lista do dia na aba "Hoje" primeiro \u2014 agora com uma 4\u00aa coluna pro c\u00f3digo do QR/c\u00f3digo de barras, \u00e9 com ela que o scan vai conciliar.</div>';
@@ -373,8 +424,8 @@
       html += '<div class="warn-box">A c\u00e2mera ligou, mas esse navegador n\u00e3o tem leitor nativo de QR/c\u00f3digo de barras (comum no iPhone/Safari). Usa a aba "Cor" nesse aparelho.</div>';
     }
     html += '<video id="video" playsinline autoplay muted style="display:' + (state.statusCamera === "ativa" ? "block" : "none") + '"></video>';
- 
-    if (state.resultadoScan) {
+
+    if (state.resultadoScan && state.resultadoScan.tipo !== "parimpar") {
       var r = state.resultadoScan;
       if (r.encontrado && r.faixa) {
         html += '<div class="result-color" style="margin-top:12px;background:' + corParaHex(r.faixa.cor) + '">' +
@@ -389,7 +440,39 @@
     }
     return html;
   }
- 
+
+  function renderParImpar() {
+    if (!state.linhasParseadas) {
+      return '<div class="warn-box">Carregue a lista do dia na aba "Hoje" primeiro \u2014 \u00e9 dela que o n\u00famero de cada pacote vem pra calcular par ou \u00edmpar.</div>';
+    }
+    var html = '<p class="muted" style="font-size:13px;margin-bottom:12px">Escaneia normalmente \u2014 aqui o resultado \u00e9 s\u00f3 par ou \u00edmpar, pra jogar direto na bolsa certa.</p>';
+    if (state.statusCamera === "idle") {
+      html += '<button class="btn-primary" data-action="iniciar-camera">\u{1F4F7} iniciar c\u00e2mera</button>';
+    } else if (state.statusCamera === "pedindo") {
+      html += '<p class="muted" style="text-align:center;padding:16px 0">pedindo acesso \u00e0 c\u00e2mera...</p>';
+    } else if (state.statusCamera === "erro") {
+      html += '<div class="warn-box">' + esc(state.erroCamera) + "</div>";
+    } else if (state.statusCamera === "sem-suporte") {
+      html += '<div class="warn-box">A c\u00e2mera ligou, mas esse navegador n\u00e3o tem leitor nativo de QR/c\u00f3digo de barras.</div>';
+    }
+    html += '<video id="video" playsinline autoplay muted style="display:' + (state.statusCamera === "ativa" ? "block" : "none") + '"></video>';
+
+    if (state.resultadoScan && state.resultadoScan.tipo === "parimpar") {
+      var r = state.resultadoScan;
+      if (r.encontrado) {
+        var c = r.classificacao;
+        html += '<div class="result-color" style="margin-top:12px;background:' + c.cor + '">' +
+          '<p style="font-size:11px;font-weight:600;text-transform:uppercase;margin:0 0 4px;color:' + c.texto + ';opacity:.85">lado</p>' +
+          '<p style="font-size:34px;font-weight:700;margin:0 0 2px;color:' + c.texto + '">' + c.label + '</p>' +
+          (c.sub ? '<p style="font-size:13px;font-weight:600;margin:0 0 6px;color:' + c.texto + '">' + c.sub + '</p>' : '') +
+          '<p style="font-size:12px;margin:0;color:' + c.texto + ';opacity:.85">' + esc(r.rua) + ' \u00b7 n\u00ba ' + esc(r.numero) + (r.nome ? " \u00b7 " + esc(r.nome) : "") + '</p></div>';
+      } else {
+        html += '<div class="result-warn" style="margin-top:12px">' + (r.semLista ? "carregue a lista do dia primeiro." : 'c\u00f3digo "' + esc(r.codigo) + '" n\u00e3o encontrado na lista de hoje.') + "</div>";
+      }
+    }
+    return html;
+  }
+
   function renderSeparar() {
     var html = "";
     if (!state.linhasParseadas) {
@@ -402,21 +485,21 @@
         '<button class="btn-primary" data-action="organizar"' + (!state.textoColado.trim() ? " disabled" : "") + ">Organizar pacotes</button>";
       return html;
     }
- 
+
     var resultado = calcularResultado();
     var totalPacotes = resultado.listaGrupos.reduce(function (s, g) { return s + g.total; }, 0);
     var totalSeparados = resultado.listaGrupos.reduce(function (s, g) {
       return s + g.enderecos.reduce(function (s2, e) { return s2 + Math.min(state.encontrados[e.key] || 0, e.count); }, 0);
     }, 0);
- 
+
     html += '<div class="card" style="padding:10px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:14px">' +
       "<span><strong>" + totalPacotes + "</strong> " + plural(totalPacotes, "pacote", "pacotes") + " \u00b7 <strong>" + resultado.listaGrupos.length + "</strong> " + plural(resultado.listaGrupos.length, "cor", "cores") + "</span>" +
       '<span style="color:var(--ok);font-weight:600">' + totalSeparados + "/" + totalPacotes + "</span></div>";
- 
+
     if (resultado.naoMapeadas.length > 0) {
       html += '<div class="warn-box" style="margin-bottom:12px"><strong>ruas n\u00e3o reconhecidas:</strong> ' + resultado.naoMapeadas.map(esc).join(", ") + ' \u2014 cadastre na aba "Faixas".</div>';
     }
- 
+
     if (resultado.semFaixa.length > 0) {
       html += '<div class="warn-box" style="margin-bottom:12px"><p style="font-weight:600;margin:0 0 8px">n\u00fameros fora de qualquer faixa</p>';
       resultado.semFaixa.forEach(function (s) {
@@ -433,7 +516,7 @@
       });
       html += "</div>";
     }
- 
+
     resultado.listaGrupos.forEach(function (g) {
       var separadosNaCaixa = g.enderecos.reduce(function (s, e) { return s + Math.min(state.encontrados[e.key] || 0, e.count); }, 0);
       html += '<div class="card" style="overflow:hidden;margin-bottom:12px">' +
@@ -441,7 +524,7 @@
         '<span style="font-size:11px;font-weight:700;border-radius:999px;padding:4px 10px;background:var(--paper-light);color:' + corParaHex(g.faixa.cor) + '">' + esc(g.faixa.cor) + "</span>" +
         '<span style="font-size:14px;font-weight:600;flex:1;color:' + corTextoParaFundo(g.faixa.cor) + '">' + esc(g.ruaNome) + " \u00b7 " + esc(g.faixa.inicio) + "\u2013" + esc(g.faixa.fim) + "</span>" +
         '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaFundo(g.faixa.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div><ul style='list-style:none;margin:0;padding:0'>";
- 
+
       g.enderecos.forEach(function (e) {
         var achados = Math.min(state.encontrados[e.key] || 0, e.count);
         var completo = achados >= e.count;
@@ -461,29 +544,45 @@
       });
       html += "</ul></div>";
     });
- 
+
     html += '<button class="btn-primary" data-action="limpar-sessao" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7;margin-top:4px">\u21BB Limpar e come\u00e7ar novo dia</button>';
     return html;
   }
- 
+
   function renderMapa() {
     var html = '<p class="muted" style="font-size:14px;margin-bottom:16px">Cada rua pode ter v\u00e1rias faixas de n\u00famero, cada uma com sua cor. Cadastre uma vez \u2014 elas quase n\u00e3o mudam.</p>';
     html += '<div class="card" style="padding:10px;margin-bottom:16px;display:flex;gap:8px">' +
       '<input id="novoNomeRua" class="rowfield" value="' + esc(state.novoNomeRua) + '" placeholder="Nome da nova rua" />' +
       '<button data-action="add-rua" style="border-radius:8px;padding:0 14px;background:var(--accent);border:none;font-weight:700">+</button></div>';
- 
+
     if (state.mapaRuas.length === 0) {
       html += '<div style="text-align:center;padding:40px 0"><p class="muted" style="font-size:14px">Nenhuma rua cadastrada ainda. Adicione a primeira acima.</p></div>';
       return html;
     }
- 
+
     state.mapaRuas.forEach(function (r) {
       var rasc = state.novaFaixaPorRua[r.id] || { inicio: "", fim: "", cor: LISTA_CORES[0] };
+      var fcRasc = state.novaFaixaCompleta[r.id] || {};
+      var fcIni = fcRasc.inicio !== undefined ? fcRasc.inicio : (r.faixaCompleta ? r.faixaCompleta.inicio : "");
+      var fcFim = fcRasc.fim !== undefined ? fcRasc.fim : (r.faixaCompleta ? r.faixaCompleta.fim : "");
       html += '<div class="card" style="overflow:hidden;margin-bottom:12px">' +
         '<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--paper-deep)">' +
         '<span style="flex:1;font-size:14px;font-weight:600">' + esc(r.nome) + "</span>" +
         '<button data-action="del-rua" data-id="' + r.id + '" style="border:none;background:none;color:var(--alert);opacity:.6;font-size:16px;cursor:pointer">\u{1F5D1}</button></div>';
- 
+
+      html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
+        '<p style="font-size:11px;font-weight:600;margin:0 0 6px;opacity:.65">FAIXA COMPLETA \u00b7 fragmenta o Par/\u00cdmpar em 2 cores cada</p>' +
+        '<div style="display:flex;align-items:center;gap:6px;font-size:12px">' +
+        '<input data-fc-inicio="' + r.id + '" value="' + esc(fcIni) + '" placeholder="de" style="width:52px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
+        '<span style="opacity:.6">at\u00e9</span>' +
+        '<input data-fc-fim="' + r.id + '" value="' + esc(fcFim) + '" placeholder="at\u00e9" style="width:52px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
+        '<button data-action="salvar-fc" data-rua="' + r.id + '" style="padding:6px 10px;border-radius:6px;font-weight:600;background:var(--ink);color:var(--paper-light);border:none">Salvar</button>' +
+        (r.faixaCompleta ? '<button data-action="limpar-fc" data-rua="' + r.id + '" style="padding:6px 9px;border-radius:6px;border:1px solid var(--line);background:none">\u2715</button>' : "") +
+        "</div>" +
+        (r.faixaCompleta ? '<p style="font-size:11px;margin:6px 0 0;opacity:.6">ativo: ' + esc(r.faixaCompleta.inicio) + '\u2013' + esc(r.faixaCompleta.fim) + ' \u2014 4 cores no Par/\u00cdmpar</p>' : '<p style="font-size:11px;margin:6px 0 0;opacity:.5">sem faixa \u2014 Par/\u00cdmpar simples (2 cores)</p>') +
+        "</div>";
+
+      html += '<p style="font-size:11px;font-weight:600;margin:10px 0 0 12px;opacity:.65">CORES POR N\u00daMERO \u00b7 pro Scan</p>';
       if (r.faixas.length > 0) {
         html += "<ul style='list-style:none;margin:0;padding:0'>";
         r.faixas.forEach(function (f) {
@@ -494,7 +593,7 @@
         });
         html += "</ul>";
       }
- 
+
       html += '<div style="display:flex;align-items:center;gap:6px;padding:8px 12px;border-top:1px solid var(--line)">' +
         '<input data-faixa-inicio="' + r.id + '" value="' + esc(rasc.inicio) + '" placeholder="de" style="width:52px;font-size:12px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
         '<input data-faixa-fim="' + r.id + '" value="' + esc(rasc.fim) + '" placeholder="at\u00e9" style="width:52px;font-size:12px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
@@ -506,18 +605,18 @@
     });
     return html;
   }
- 
+
   // ---------- eventos ----------
   function attachHandlers() {
     var app = document.getElementById("app");
- 
+
     app.querySelectorAll("[data-tab]").forEach(function (el) {
       el.onclick = function () { setAba(el.getAttribute("data-tab")); };
     });
     // Escanear
     var iniciarBtn = app.querySelector('[data-action="iniciar-camera"]');
     if (iniciarBtn) iniciarBtn.onclick = iniciarCamera;
- 
+
     // Separar - textarea
     var textoEl = document.getElementById("textoColado");
     if (textoEl) textoEl.oninput = function () { state.textoColado = textoEl.value; var btn = app.querySelector('[data-action="organizar"]'); if (btn) btn.disabled = !state.textoColado.trim(); };
@@ -525,7 +624,7 @@
     if (organizarBtn) organizarBtn.onclick = organizarPacotes;
     var limparSessaoBtn = app.querySelector('[data-action="limpar-sessao"]');
     if (limparSessaoBtn) limparSessaoBtn.onclick = limparSessao;
- 
+
     app.querySelectorAll('[data-action="toggle-item"]').forEach(function (el) {
       el.onclick = function () {
         var completo = el.getAttribute("data-completo") === "1";
@@ -537,7 +636,7 @@
         ajustarEncontrado(el.getAttribute("data-key"), parseInt(el.getAttribute("data-max"), 10), parseInt(el.getAttribute("data-delta"), 10));
       };
     });
- 
+
     app.querySelectorAll("[data-pend-inicio]").forEach(function (el) {
       el.oninput = function () { var r = el.getAttribute("data-pend-inicio"); state.novaFaixaPendente[r] = Object.assign({}, state.novaFaixaPendente[r], { inicio: el.value.replace(/[^0-9]/g, "") }); };
     });
@@ -550,7 +649,7 @@
     app.querySelectorAll('[data-action="add-pendente"]').forEach(function (el) {
       el.onclick = function () { adicionarFaixaPendente(el.getAttribute("data-rua")); };
     });
- 
+
     // Mapa
     var novoNomeEl = document.getElementById("novoNomeRua");
     if (novoNomeEl) novoNomeEl.oninput = function () { state.novoNomeRua = novoNomeEl.value; };
@@ -574,8 +673,20 @@
     app.querySelectorAll('[data-action="add-faixa"]').forEach(function (el) {
       el.onclick = function () { adicionarFaixa(el.getAttribute("data-rua")); };
     });
+    app.querySelectorAll("[data-fc-inicio]").forEach(function (el) {
+      el.oninput = function () { var r = el.getAttribute("data-fc-inicio"); state.novaFaixaCompleta[r] = Object.assign({}, state.novaFaixaCompleta[r], { inicio: el.value.replace(/[^0-9]/g, "") }); };
+    });
+    app.querySelectorAll("[data-fc-fim]").forEach(function (el) {
+      el.oninput = function () { var r = el.getAttribute("data-fc-fim"); state.novaFaixaCompleta[r] = Object.assign({}, state.novaFaixaCompleta[r], { fim: el.value.replace(/[^0-9]/g, "") }); };
+    });
+    app.querySelectorAll('[data-action="salvar-fc"]').forEach(function (el) {
+      el.onclick = function () { salvarFaixaCompleta(el.getAttribute("data-rua")); };
+    });
+    app.querySelectorAll('[data-action="limpar-fc"]').forEach(function (el) {
+      el.onclick = function () { limparFaixaCompleta(el.getAttribute("data-rua")); };
+    });
   }
- 
+
   render();
 })();
 </script>
