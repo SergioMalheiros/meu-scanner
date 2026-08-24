@@ -1,0 +1,68 @@
+<div style="max-width: 420px; margin: 0 auto; padding: 1rem 0; font-family: -apple-system, 'Segoe UI', Roboto, sans-serif;">
+  <h2 style="font-size: 16px; font-weight: 500; margin: 0 0 4px; color: #1B2620;">teste: seu celular consegue escanear?</h2>
+  <p style="font-size: 13px; color: #5F5E5A; margin: 0 0 14px; line-height: 1.5;">
+    isso é só um experimento técnico pra descobrir se dá certo no seu aparelho, dentro do navegador. nada aqui é enviado ou salvo em lugar nenhum.
+  </p>
+  <button id="btnTestar" style="width: 100%; padding: 12px; border-radius: 8px; border: none; background: #1B2620; color: #F5F2E7; font-size: 14px; font-weight: 500; cursor: pointer;">
+    testar câmera
+  </button>
+  <div id="status" style="margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: #F5F2E7; border: 1px solid #CBC5AA; font-size: 13px; color: #1B2620; display: none; line-height: 1.5;"></div>
+  <video id="video" playsinline autoplay muted style="width: 100%; border-radius: 8px; background: #000; display: none; margin-top: 10px;"></video>
+  <div id="resultado" style="margin-top: 10px; padding: 10px 12px; border-radius: 8px; background: #DCE8DF; font-size: 14px; font-weight: 500; color: #1B2620; display: none;"></div>
+</div>
+
+<script>
+(function () {
+  const btn = document.getElementById('btnTestar');
+  const statusEl = document.getElementById('status');
+  const video = document.getElementById('video');
+  const resultadoEl = document.getElementById('resultado');
+  let scanning = false;
+
+  btn.addEventListener('click', async function () {
+    statusEl.style.display = 'block';
+    statusEl.textContent = 'pedindo acesso à câmera...';
+
+    if (!('mediaDevices' in navigator) || !navigator.mediaDevices.getUserMedia) {
+      statusEl.textContent = 'esse ambiente não expõe acesso à câmera aqui dentro do chat.';
+      return;
+    }
+
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+    } catch (e) {
+      statusEl.textContent = 'não consegui acessar a câmera (permissão negada ou bloqueada pelo ambiente). detalhe técnico: ' + e.message;
+      return;
+    }
+
+    video.srcObject = stream;
+    video.style.display = 'block';
+    btn.style.display = 'none';
+
+    if (!('BarcodeDetector' in window)) {
+      statusEl.textContent = 'a câmera funcionou, mas esse navegador não tem o leitor nativo de código de barras (comum no iphone/safari). dá pra pensar numa alternativa, mas não por esse caminho específico.';
+      return;
+    }
+
+    statusEl.textContent = 'câmera ativa — aponte pra qualquer código de barras ou qr code perto de você pra testar.';
+
+    const detector = new BarcodeDetector();
+    scanning = true;
+    async function tick() {
+      if (!scanning) return;
+      try {
+        const codes = await detector.detect(video);
+        if (codes.length > 0) {
+          resultadoEl.style.display = 'block';
+          resultadoEl.textContent = 'encontrado: ' + codes[0].rawValue + ' (' + codes[0].format + ')';
+        }
+      } catch (e) {
+        // ignora frames sem leitura
+      }
+      requestAnimationFrame(tick);
+    }
+    tick();
+  });
+})();
+</script>
