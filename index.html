@@ -51,7 +51,7 @@
   .checkbox { width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--line); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
   .checkbox.done { background: var(--ok); border-color: var(--ok); }
   .riscado { text-decoration: line-through; opacity: .45; }
-  video { width: 100%; border-radius: 10px; background: #000; margin-top: 12px; }
+  video { width: 100%; min-height: 240px; object-fit: cover; border-radius: 10px; background: #000; margin-top: 12px; }
   .warn-box { border-radius: 10px; padding: 12px; font-size: 13px; background: var(--alert-light); color: var(--alert); }
 </style>
 </head>
@@ -314,7 +314,10 @@
       state.statusCamera = ("BarcodeDetector" in window) ? "ativa" : "sem-suporte";
       render();
       var video = document.getElementById("video");
-      if (video) video.srcObject = stream;
+      if (video) {
+        video.srcObject = stream;
+        video.play().catch(function () { /* alguns navegadores exigem toque; ignora aqui */ });
+      }
       if (!("BarcodeDetector" in window)) return;
       var detector = new BarcodeDetector();
       function tick() {
@@ -361,8 +364,11 @@
  
     attachHandlers();
     if (state.aba === "escanear" && streamAtual) {
-      var v = document.getElementById("video");
-      if (v) v.srcObject = streamAtual;
+      var v2 = document.getElementById("video");
+      if (v2 && v2.srcObject !== streamAtual) {
+        v2.srcObject = streamAtual;
+        v2.play().catch(function () {});
+      }
     }
   }
  
