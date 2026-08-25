@@ -47,6 +47,9 @@
   .warn-box { border-radius: 10px; padding: 12px; font-size: 13px; background: var(--alert-light); color: var(--alert); }
   .colorpick-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; font-size: 13px; }
   .colorpick-row input[type=color] { width: 40px; height: 32px; border-radius: 8px; border: 1px solid var(--line); padding: 2px; background: none; cursor: pointer; }
+  .pill { font-size: 11px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--paper-light); color: var(--ink); cursor: pointer; font-family: inherit; font-weight: 600; }
+  .pill.ativo-entregue { background: var(--ok); border-color: var(--ok); color: var(--paper-light); }
+  .pill.ativo-devolvido { background: var(--alert); border-color: var(--alert); color: var(--paper-light); }
 </style>
 </head>
 <body>
@@ -144,7 +147,7 @@
     mapaRuas: [],
     textoColado: "",
     linhasParseadas: null,
-    encontrados: {},
+    pacoteStatus: {},
     novoNomeRua: "",
     statusCamera: "idle",
     erroCamera: "",
@@ -159,7 +162,7 @@
   }
   function salvarMapa() { salvar("mapa-ruas", state.mapaRuas); }
   function salvarSessao() {
-    salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, encontrados: state.encontrados });
+    salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus });
   }
 
   state.mapaRuas = carregar("mapa-ruas", []).map(function (r) {
@@ -172,7 +175,7 @@
   if (sess) {
     state.textoColado = sess.texto || "";
     state.linhasParseadas = sess.linhas || null;
-    state.encontrados = sess.encontrados || {};
+    state.pacoteStatus = sess.pacoteStatus || {};
   }
 
   function adicionarRua() {
@@ -210,14 +213,27 @@
     salvarSessao();
     render();
   }
-  function ajustarEncontrado(key, max, delta) {
-    var atual = state.encontrados[key] || 0;
-    state.encontrados[key] = Math.max(0, Math.min(max, atual + delta));
+  function statusDe(id) {
+    return state.pacoteStatus[id] || { separado: false, entregue: false, devolvido: false };
+  }
+  function marcarSeparado(id, valor) {
+    if (!state.pacoteStatus[id]) state.pacoteStatus[id] = { separado: false, entregue: false, devolvido: false };
+    state.pacoteStatus[id].separado = valor;
+    salvarSessao();
+    render();
+  }
+  function marcarEntrega(id, campo) {
+    if (!state.pacoteStatus[id]) state.pacoteStatus[id] = { separado: false, entregue: false, devolvido: false };
+    var atual = state.pacoteStatus[id];
+    var ligar = !atual[campo];
+    atual[campo] = ligar;
+    if (campo === "entregue" && ligar) atual.devolvido = false;
+    if (campo === "devolvido" && ligar) atual.entregue = false;
     salvarSessao();
     render();
   }
   function limparSessao() {
-    state.textoColado = ""; state.linhasParseadas = null; state.encontrados = {};
+    state.textoColado = ""; state.linhasParseadas = null; state.pacoteStatus = {};
     salvarSessao();
     render();
   }
@@ -241,16 +257,8 @@
 
     var listaGrupos = Object.keys(porGrupo).map(function (k) {
       var g = porGrupo[k];
-      var porNumero = {};
-      g.itens.forEach(function (item) {
-        if (!porNumero[item.numero]) porNumero[item.numero] = { numero: item.numero, nomes: [], count: 0 };
-        porNumero[item.numero].count++;
-        if (item.nome) porNumero[item.numero].nomes.push(item.nome);
-      });
-      var enderecos = Object.keys(porNumero).map(function (nk) { return porNumero[nk]; })
-        .sort(function (a, b) { return ordenarNumerico(a.numero, b.numero); })
-        .map(function (e) { return Object.assign({ key: k + "|" + e.numero }, e); });
-      return { ruaNome: g.ruaNome, label: g.label, cor: g.cor, enderecos: enderecos, total: g.itens.length };
+      var itens = g.itens.slice().sort(function (a, b) { return ordenarNumerico(a.numero, b.numero); });
+      return { ruaNome: g.ruaNome, label: g.label, cor: g.cor, itens: itens, total: itens.length };
     }).sort(function (a, b) {
       var rc = a.ruaNome.localeCompare(b.ruaNome, "pt-BR");
       return rc !== 0 ? rc : a.cor.localeCompare(b.cor);
@@ -280,14 +288,7 @@
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
     var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch, calcularSplitsPorRua()) : null;
     state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, classificacao: classificacao };
-
-    if (classificacao) {
-      var resultado = calcularResultado();
-      var grupo = resultado.listaGrupos.find(function (g) { return g.ruaNome === (ruaMatch ? ruaMatch.nome : null) && g.cor === classificacao.cor; });
-      var endereco = grupo && grupo.enderecos.find(function (e) { return e.numero === linha.numero; });
-      if (endereco) ajustarEncontrado(endereco.key, endereco.count, 1);
-    }
-    render();
+    marcarSeparado(linha.id, true);
   }
 
   function iniciarCamera() {
@@ -395,6 +396,50 @@
     return html;
   }
 
+  function renderResumoBar(resultado) {
+    var todos = [];
+    resultado.listaGrupos.forEach(function (g) { todos = todos.concat(g.itens); });
+    var total = todos.length;
+    var separados = todos.filter(function (it) { return statusDe(it.id).separado; }).length;
+    var entregues = todos.filter(function (it) { return statusDe(it.id).entregue; }).length;
+    var devolvidos = todos.filter(function (it) { return statusDe(it.id).devolvido; }).length;
+
+    var html = '<div class="card" style="padding:10px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:14px">' +
+      "<span><strong>" + total + "</strong> " + plural(total, "pacote", "pacotes") + " \u00b7 <strong>" + resultado.listaGrupos.length + "</strong> " + plural(resultado.listaGrupos.length, "cor", "cores") + "</span>" +
+      '<span style="color:var(--ok);font-weight:600">' + separados + "/" + total + " separados</span></div>";
+    if (entregues > 0 || devolvidos > 0) {
+      html += '<div class="card" style="padding:8px 12px;margin-bottom:12px;font-size:12px;display:flex;gap:14px">' +
+        '<span style="color:var(--ok)">\u2713 ' + entregues + " " + plural(entregues, "entregue", "entregues") + "</span>" +
+        '<span style="color:var(--alert)">\u21A9 ' + devolvidos + " " + plural(devolvidos, "devolvido", "devolvidos") + "</span></div>";
+    }
+    return html;
+  }
+
+  function renderListaGrupos(resultado) {
+    var html = "";
+    resultado.listaGrupos.forEach(function (g) {
+      var separadosNaCaixa = g.itens.filter(function (it) { return statusDe(it.id).separado; }).length;
+      html += '<div class="card" style="overflow:hidden;margin-bottom:12px">' +
+        '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:' + g.cor + '">' +
+        '<span style="font-size:14px;font-weight:700;flex:1;color:' + corTextoParaHex(g.cor) + '">' + g.label + " \u00b7 " + esc(g.ruaNome) + "</span>" +
+        '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaHex(g.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div><ul style='list-style:none;margin:0;padding:0'>";
+
+      g.itens.forEach(function (item) {
+        var st = statusDe(item.id);
+        html += '<li style="padding:8px 12px;border-top:1px solid var(--line)">' +
+          '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer">' +
+          '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
+          '<span' + (st.separado ? ' class="riscado"' : "") + ">n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "") + "</span></div>" +
+          '<div style="display:flex;gap:6px;margin-top:6px;margin-left:28px">' +
+          '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="entregue" class="pill' + (st.entregue ? " ativo-entregue" : "") + '">Entregue</button>' +
+          '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="devolvido" class="pill' + (st.devolvido ? " ativo-devolvido" : "") + '">Devolvido</button>' +
+          "</div></li>";
+      });
+      html += "</ul></div>";
+    });
+    return html;
+  }
+
   function renderSeparar() {
     var html = "";
     if (!state.linhasParseadas) {
@@ -408,14 +453,7 @@
     }
 
     var resultado = calcularResultado();
-    var totalPacotes = resultado.listaGrupos.reduce(function (s, g) { return s + g.total; }, 0);
-    var totalSeparados = resultado.listaGrupos.reduce(function (s, g) {
-      return s + g.enderecos.reduce(function (s2, e) { return s2 + Math.min(state.encontrados[e.key] || 0, e.count); }, 0);
-    }, 0);
-
-    html += '<div class="card" style="padding:10px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:14px">' +
-      "<span><strong>" + totalPacotes + "</strong> " + plural(totalPacotes, "pacote", "pacotes") + " \u00b7 <strong>" + resultado.listaGrupos.length + "</strong> " + plural(resultado.listaGrupos.length, "cor", "cores") + "</span>" +
-      '<span style="color:var(--ok);font-weight:600">' + totalSeparados + "/" + totalPacotes + "</span></div>";
+    html += renderResumoBar(resultado);
 
     if (resultado.naoMapeadas.length > 0) {
       html += '<div class="warn-box" style="margin-bottom:12px"><strong>ruas n\u00e3o reconhecidas:</strong> ' + resultado.naoMapeadas.map(esc).join(", ") + ' \u2014 cadastre na aba "Faixas".</div>';
@@ -426,33 +464,7 @@
         resultado.erros.map(function (e) { return "<li style='font-family:ui-monospace,monospace'>" + esc(e.raw) + "</li>"; }).join("") + "</ul></details>";
     }
 
-    resultado.listaGrupos.forEach(function (g) {
-      var separadosNaCaixa = g.enderecos.reduce(function (s, e) { return s + Math.min(state.encontrados[e.key] || 0, e.count); }, 0);
-      html += '<div class="card" style="overflow:hidden;margin-bottom:12px">' +
-        '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:' + g.cor + '">' +
-        '<span style="font-size:14px;font-weight:700;flex:1;color:' + corTextoParaHex(g.cor) + '">' + g.label + " \u00b7 " + esc(g.ruaNome) + "</span>" +
-        '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaHex(g.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div><ul style='list-style:none;margin:0;padding:0'>";
-
-      g.enderecos.forEach(function (e) {
-        var achados = Math.min(state.encontrados[e.key] || 0, e.count);
-        var completo = achados >= e.count;
-        if (e.count === 1) {
-          html += '<li data-action="toggle-item" data-key="' + e.key + '" data-max="1" data-completo="' + (completo ? "1" : "0") + '" style="display:flex;align-items:center;gap:10px;padding:8px 12px;font-size:14px;border-top:1px solid var(--line);cursor:pointer">' +
-            '<span class="checkbox' + (completo ? " done" : "") + '">' + (completo ? "\u2713" : "") + "</span>" +
-            '<span' + (completo ? ' class="riscado"' : "") + ">n\u00ba " + esc(e.numero) + (e.nomes[0] ? " \u00b7 " + esc(e.nomes[0]) : "") + "</span></li>";
-        } else {
-          html += '<li style="display:flex;align-items:center;gap:10px;padding:8px 12px;font-size:14px;border-top:1px solid var(--line)">' +
-            '<span style="flex:1">n\u00ba ' + esc(e.numero) + '<span style="margin-left:6px;font-size:12px;font-family:ui-monospace,monospace;color:var(--accent-deep)">\u00b7 ' + e.count + " pacotes</span></span>" +
-            '<div style="display:flex;align-items:center;gap:4px">' +
-            '<button data-action="ajustar" data-key="' + e.key + '" data-max="' + e.count + '" data-delta="-1" style="width:26px;height:26px;border-radius:6px;border:1px solid var(--line);background:var(--paper-light)"' + (achados === 0 ? " disabled" : "") + ">\u2212</button>" +
-            '<span style="width:34px;text-align:center;font-family:ui-monospace,monospace;font-size:12px;font-weight:' + (completo ? "700" : "400") + ';color:' + (completo ? "var(--ok)" : "var(--ink)") + '">' + achados + "/" + e.count + "</span>" +
-            '<button data-action="ajustar" data-key="' + e.key + '" data-max="' + e.count + '" data-delta="1" style="width:26px;height:26px;border-radius:6px;border:none;background:' + (completo ? "var(--ok)" : "var(--accent)") + ";color:" + (completo ? "var(--paper-light)" : "var(--ink)") + '"' + (achados >= e.count ? " disabled" : "") + ">+</button>" +
-            "</div></li>";
-        }
-      });
-      html += "</ul></div>";
-    });
-
+    html += renderListaGrupos(resultado);
     html += '<button class="btn-primary" data-action="limpar-sessao" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7;margin-top:4px">\u21BB Limpar e come\u00e7ar novo dia</button>';
     return html;
   }
@@ -530,15 +542,15 @@
     var limparSessaoBtn = app.querySelector('[data-action="limpar-sessao"]');
     if (limparSessaoBtn) limparSessaoBtn.onclick = limparSessao;
 
-    app.querySelectorAll('[data-action="toggle-item"]').forEach(function (el) {
+    app.querySelectorAll('[data-action="toggle-separado"]').forEach(function (el) {
       el.onclick = function () {
-        var completo = el.getAttribute("data-completo") === "1";
-        ajustarEncontrado(el.getAttribute("data-key"), parseInt(el.getAttribute("data-max"), 10), completo ? -1 : 1);
+        var atual = statusDe(el.getAttribute("data-id")).separado;
+        marcarSeparado(el.getAttribute("data-id"), !atual);
       };
     });
-    app.querySelectorAll('[data-action="ajustar"]').forEach(function (el) {
+    app.querySelectorAll('[data-action="marcar-entrega"]').forEach(function (el) {
       el.onclick = function () {
-        ajustarEncontrado(el.getAttribute("data-key"), parseInt(el.getAttribute("data-max"), 10), parseInt(el.getAttribute("data-delta"), 10));
+        marcarEntrega(el.getAttribute("data-id"), el.getAttribute("data-campo"));
       };
     });
 
