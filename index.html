@@ -76,20 +76,42 @@
     var luminancia = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
     return luminancia > 0.6 ? "#1B2620" : "#F5F2E7";
   }
-  function classificar(numero, ruaObj) {
+  function calcularSplitsPorRua() {
+    var splits = {};
+    if (!state.linhasParseadas) return splits;
+    var validas = state.linhasParseadas.filter(function (l) { return !l.erro; });
+    var porRua = {};
+    validas.forEach(function (l) {
+      var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
+      if (!ruaMatch) return;
+      var n = parseInt(l.numero, 10);
+      if (isNaN(n)) return;
+      if (!porRua[ruaMatch.id]) porRua[ruaMatch.id] = { par: [], impar: [] };
+      porRua[ruaMatch.id][n % 2 === 0 ? "par" : "impar"].push(n);
+    });
+    Object.keys(porRua).forEach(function (ruaId) {
+      var pares = porRua[ruaId].par.slice().sort(function (a, b) { return a - b; });
+      var impares = porRua[ruaId].impar.slice().sort(function (a, b) { return a - b; });
+      splits[ruaId] = {
+        parCorte: pares.length ? pares[Math.ceil(pares.length / 2) - 1] : null,
+        parTotal: pares.length,
+        imparCorte: impares.length ? impares[Math.ceil(impares.length / 2) - 1] : null,
+        imparTotal: impares.length
+      };
+    });
+    return splits;
+  }
+  function classificar(numero, ruaObj, splits) {
     var n = parseInt(numero, 10);
     if (isNaN(n)) return null;
     var par = (n % 2 === 0);
     var cores = (ruaObj && ruaObj.cores) || coresPadrao();
-    var fc = ruaObj && ruaObj.faixaCompleta;
-    if (fc && fc.inicio && fc.fim) {
-      var ini = parseInt(fc.inicio, 10), fim = parseInt(fc.fim, 10);
-      if (!isNaN(ini) && !isNaN(fim) && fim > ini) {
-        var meio = (ini + fim) / 2;
-        var primeira = n <= meio;
-        var cor4 = par ? (primeira ? cores.par1 : cores.par2) : (primeira ? cores.impar1 : cores.impar2);
-        return { label: par ? "PAR" : "\u00cdMPAR", cor: cor4 };
-      }
+    var s = splits && ruaObj && splits[ruaObj.id];
+    var corte = s ? (par ? s.parCorte : s.imparCorte) : null;
+    if (ruaObj && ruaObj.fragmentar && corte !== null && corte !== undefined) {
+      var primeira = n <= corte;
+      var cor4 = par ? (primeira ? cores.par1 : cores.par2) : (primeira ? cores.impar1 : cores.impar2);
+      return { label: par ? "PAR" : "\u00cdMPAR", cor: cor4 };
     }
     var corSimples = par ? cores.par1 : cores.impar1;
     return { label: par ? "PAR" : "\u00cdMPAR", cor: corSimples };
@@ -124,7 +146,6 @@
     linhasParseadas: null,
     encontrados: {},
     novoNomeRua: "",
-    novaFaixaCompleta: {},
     statusCamera: "idle",
     erroCamera: "",
     resultadoScan: null
@@ -142,7 +163,10 @@
   }
 
   state.mapaRuas = carregar("mapa-ruas", []).map(function (r) {
-    return Object.assign({ cores: coresPadrao() }, r, { cores: r.cores || coresPadrao() });
+    var m = Object.assign({ cores: coresPadrao() }, r, { cores: r.cores || coresPadrao() });
+    if (m.faixaCompleta && m.fragmentar === undefined) m.fragmentar = true;
+    delete m.faixaCompleta;
+    return m;
   });
   var sess = carregar("sessao-atual", null);
   if (sess) {
@@ -164,20 +188,10 @@
     salvarMapa();
     render();
   }
-  function salvarFaixaCompleta(ruaId) {
-    var rasc = state.novaFaixaCompleta[ruaId] || {};
-    var inicio = (rasc.inicio || "").trim(), fim = (rasc.fim || "").trim();
-    var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
-    if (!rua || !inicio || !fim) return;
-    rua.faixaCompleta = { inicio: inicio, fim: fim };
-    salvarMapa();
-    render();
-  }
-  function limparFaixaCompleta(ruaId) {
+  function toggleFragmentar(ruaId, valor) {
     var rua = state.mapaRuas.find(function (r) { return r.id === ruaId; });
     if (!rua) return;
-    delete rua.faixaCompleta;
-    delete state.novaFaixaCompleta[ruaId];
+    rua.fragmentar = valor;
     salvarMapa();
     render();
   }
@@ -210,6 +224,7 @@
 
   function calcularResultado() {
     if (!state.linhasParseadas) return null;
+    var splits = calcularSplitsPorRua();
     var validas = state.linhasParseadas.filter(function (l) { return !l.erro; });
     var erros = state.linhasParseadas.filter(function (l) { return l.erro; });
     var naoMapeadas = {};
@@ -218,7 +233,7 @@
     validas.forEach(function (l) {
       var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
       if (!ruaMatch) { naoMapeadas[l.rua] = true; return; }
-      var c = classificar(l.numero, ruaMatch);
+      var c = classificar(l.numero, ruaMatch, splits);
       var key = ruaMatch.id + "|" + c.cor;
       if (!porGrupo[key]) porGrupo[key] = { ruaNome: ruaMatch.nome, label: c.label, cor: c.cor, itens: [] };
       porGrupo[key].itens.push(l);
@@ -263,7 +278,7 @@
     if (!linha) { state.resultadoScan = { encontrado: false, codigo: codigo }; render(); return; }
 
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
-    var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch) : null;
+    var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch, calcularSplitsPorRua()) : null;
     state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, classificacao: classificacao };
 
     if (classificacao) {
@@ -369,8 +384,8 @@
       if (r.encontrado && r.classificacao) {
         var c = r.classificacao;
         html += '<div class="result-color" style="margin-top:12px;background:' + c.cor + '">' +
-          '<p style="font-size:36px;font-weight:700;margin:0 0 10px;color:' + corTextoParaHex(c.cor) + '">' + c.label + '</p>' +
-          '<p style="font-size:12px;margin:0;color:' + corTextoParaHex(c.cor) + ';opacity:.85">' + esc(r.rua) + ' \u00b7 n\u00ba ' + esc(r.numero) + (r.nome ? " \u00b7 " + esc(r.nome) : "") + '</p></div>';
+          '<p style="font-size:32px;font-weight:700;margin:0 0 10px;color:' + corTextoParaHex(c.cor) + '">' + c.label + '</p>' +
+          '<p style="font-size:16px;font-weight:600;margin:0;color:' + corTextoParaHex(c.cor) + ';opacity:.9">' + esc(r.rua) + ' \u00b7 n\u00ba ' + esc(r.numero) + (r.nome ? " \u00b7 " + esc(r.nome) : "") + '</p></div>';
       } else if (r.encontrado) {
         html += '<div class="result-warn" style="margin-top:12px">Achei o pacote (' + esc(r.rua) + ", n\u00ba " + esc(r.numero) + ") mas essa rua n\u00e3o est\u00e1 cadastrada.</div>";
       } else {
@@ -453,12 +468,11 @@
       return html;
     }
 
+    var splitsAtual = calcularSplitsPorRua();
     state.mapaRuas.forEach(function (r) {
-      var fcRasc = state.novaFaixaCompleta[r.id] || {};
-      var fcIni = fcRasc.inicio !== undefined ? fcRasc.inicio : (r.faixaCompleta ? r.faixaCompleta.inicio : "");
-      var fcFim = fcRasc.fim !== undefined ? fcRasc.fim : (r.faixaCompleta ? r.faixaCompleta.fim : "");
       var cores = r.cores || coresPadrao();
-      var fragmentado = !!(r.faixaCompleta && r.faixaCompleta.inicio && r.faixaCompleta.fim);
+      var fragmentado = !!r.fragmentar;
+      var s = splitsAtual[r.id];
 
       html += '<div class="card" style="overflow:hidden;margin-bottom:14px">' +
         '<div style="display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--paper-deep)">' +
@@ -466,14 +480,17 @@
         '<button data-action="del-rua" data-id="' + r.id + '" style="border:none;background:none;color:var(--alert);opacity:.6;font-size:16px;cursor:pointer">\u{1F5D1}</button></div>';
 
       html += '<div style="padding:10px 12px;border-top:1px solid var(--line)">' +
-        '<p style="font-size:11px;font-weight:600;margin:0 0 6px;opacity:.65">FAIXA COMPLETA \u00b7 opcional, fragmenta em 4 cores</p>' +
-        '<div style="display:flex;align-items:center;gap:6px;font-size:12px">' +
-        '<input data-fc-inicio="' + r.id + '" value="' + esc(fcIni) + '" placeholder="de" style="width:52px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
-        '<span style="opacity:.6">at\u00e9</span>' +
-        '<input data-fc-fim="' + r.id + '" value="' + esc(fcFim) + '" placeholder="at\u00e9" style="width:52px;padding:6px;border-radius:6px;border:1px solid var(--line);text-align:center" />' +
-        '<button data-action="salvar-fc" data-rua="' + r.id + '" style="padding:6px 10px;border-radius:6px;font-weight:600;background:var(--ink);color:var(--paper-light);border:none">Salvar</button>' +
-        (fragmentado ? '<button data-action="limpar-fc" data-rua="' + r.id + '" style="padding:6px 9px;border-radius:6px;border:1px solid var(--line);background:none">\u2715</button>' : "") +
-        "</div></div>";
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">' +
+        '<input type="checkbox" data-frag="' + r.id + '"' + (fragmentado ? " checked" : "") + ' style="width:16px;height:16px" />' +
+        "Fragmentar em 4 cores, com base nos n\u00fameros de hoje</label>";
+      if (fragmentado) {
+        if (s && (s.parTotal || s.imparTotal)) {
+          html += '<p style="font-size:11px;margin:6px 0 0;opacity:.6">hoje: ' + s.parTotal + " pares (corte no n\u00ba " + (s.parCorte != null ? s.parCorte : "\u2014") + ") \u00b7 " + s.imparTotal + " \u00edmpares (corte no n\u00ba " + (s.imparCorte != null ? s.imparCorte : "\u2014") + ")</p>";
+        } else {
+          html += '<p style="font-size:11px;margin:6px 0 0;opacity:.5">carregue a lista de hoje pra calcular o corte.</p>';
+        }
+      }
+      html += "</div>";
 
       html += '<div style="padding:4px 12px 10px;border-top:1px solid var(--line)">' +
         '<p style="font-size:11px;font-weight:600;margin:8px 0 0;opacity:.65">CORES</p>';
@@ -532,17 +549,8 @@
     app.querySelectorAll('[data-action="del-rua"]').forEach(function (el) {
       el.onclick = function () { removerRua(el.getAttribute("data-id")); };
     });
-    app.querySelectorAll("[data-fc-inicio]").forEach(function (el) {
-      el.oninput = function () { var r = el.getAttribute("data-fc-inicio"); state.novaFaixaCompleta[r] = Object.assign({}, state.novaFaixaCompleta[r], { inicio: el.value.replace(/[^0-9]/g, "") }); };
-    });
-    app.querySelectorAll("[data-fc-fim]").forEach(function (el) {
-      el.oninput = function () { var r = el.getAttribute("data-fc-fim"); state.novaFaixaCompleta[r] = Object.assign({}, state.novaFaixaCompleta[r], { fim: el.value.replace(/[^0-9]/g, "") }); };
-    });
-    app.querySelectorAll('[data-action="salvar-fc"]').forEach(function (el) {
-      el.onclick = function () { salvarFaixaCompleta(el.getAttribute("data-rua")); };
-    });
-    app.querySelectorAll('[data-action="limpar-fc"]').forEach(function (el) {
-      el.onclick = function () { limparFaixaCompleta(el.getAttribute("data-rua")); };
+    app.querySelectorAll("[data-frag]").forEach(function (el) {
+      el.onchange = function () { toggleFragmentar(el.getAttribute("data-frag"), el.checked); };
     });
     app.querySelectorAll("[data-cor-rua]").forEach(function (el) {
       el.onchange = function () { definirCor(el.getAttribute("data-cor-rua"), el.getAttribute("data-cor-campo"), el.value); };
