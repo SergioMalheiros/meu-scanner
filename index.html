@@ -424,12 +424,18 @@
         '<span style="font-size:14px;font-weight:700;flex:1;color:' + corTextoParaHex(g.cor) + '">' + g.label + " \u00b7 " + esc(g.ruaNome) + "</span>" +
         '<span style="font-size:11px;font-family:ui-monospace,monospace;color:' + corTextoParaHex(g.cor) + ';opacity:.85">' + separadosNaCaixa + "/" + g.total + "</span></div><ul style='list-style:none;margin:0;padding:0'>";
 
+      var contagemPorNumero = {};
+      g.itens.forEach(function (it) { contagemPorNumero[it.numero] = (contagemPorNumero[it.numero] || 0) + 1; });
+
       g.itens.forEach(function (item) {
         var st = statusDe(item.id);
+        var qtdMesmoNumero = contagemPorNumero[item.numero];
         html += '<li style="padding:8px 12px;border-top:1px solid var(--line)">' +
           '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
-          '<span' + (st.separado ? ' class="riscado"' : "") + ">n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "") + "</span></div>" +
+          '<span' + (st.separado ? ' class="riscado"' : "") + ">n\u00ba " + esc(item.numero) +
+          (qtdMesmoNumero > 1 ? ' <span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--accent-deep)">(' + qtdMesmoNumero + " pacotes)</span>" : "") +
+          (item.nome ? " \u00b7 " + esc(item.nome) : "") + "</span></div>" +
           '<div style="display:flex;gap:6px;margin-top:6px;margin-left:28px">' +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="entregue" class="pill' + (st.entregue ? " ativo-entregue" : "") + '">Entregue</button>' +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="devolvido" class="pill' + (st.devolvido ? " ativo-devolvido" : "") + '">Devolvido</button>' +
@@ -495,12 +501,14 @@
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">' +
         '<input type="checkbox" data-frag="' + r.id + '"' + (fragmentado ? " checked" : "") + ' style="width:16px;height:16px" />' +
         "Fragmentar em 4 cores, com base nos n\u00fameros de hoje</label>";
-      if (fragmentado) {
-        if (s && (s.parTotal || s.imparTotal)) {
+      if (s && (s.parTotal || s.imparTotal)) {
+        if (fragmentado) {
           html += '<p style="font-size:11px;margin:6px 0 0;opacity:.6">hoje: ' + s.parTotal + " pares (corte no n\u00ba " + (s.parCorte != null ? s.parCorte : "\u2014") + ") \u00b7 " + s.imparTotal + " \u00edmpares (corte no n\u00ba " + (s.imparCorte != null ? s.imparCorte : "\u2014") + ")</p>";
         } else {
-          html += '<p style="font-size:11px;margin:6px 0 0;opacity:.5">carregue a lista de hoje pra calcular o corte.</p>';
+          html += '<p style="font-size:11px;margin:6px 0 0;opacity:.6">hoje: ' + s.parTotal + " pares \u00b7 " + s.imparTotal + " \u00edmpares</p>";
         }
+      } else {
+        html += '<p style="font-size:11px;margin:6px 0 0;opacity:.5">carregue a lista de hoje pra ver a contagem.</p>';
       }
       html += "</div>";
 
