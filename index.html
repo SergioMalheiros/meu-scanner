@@ -140,6 +140,7 @@
   }
   function plural(n, s, p) { return n === 1 ? s : p; }
   function esc(s) { var d = document.createElement("div"); d.textContent = s == null ? "" : String(s); return d.innerHTML; }
+  function formatarNumero(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, "."); }
 
   // ---------- estado ----------
   var state = {
@@ -171,6 +172,7 @@
     delete m.faixaCompleta;
     return m;
   });
+  state.contadorGlobal = carregar("contador-pacotes-total", 0);
   var sess = carregar("sessao-atual", null);
   if (sess) {
     state.textoColado = sess.texto || "";
@@ -218,7 +220,12 @@
   }
   function marcarSeparado(id, valor) {
     if (!state.pacoteStatus[id]) state.pacoteStatus[id] = { separado: false, entregue: false, devolvido: false };
+    var jaEstava = state.pacoteStatus[id].separado;
     state.pacoteStatus[id].separado = valor;
+    if (valor && !jaEstava) {
+      state.contadorGlobal = (state.contadorGlobal || 0) + 1;
+      salvar("contador-pacotes-total", state.contadorGlobal);
+    }
     salvarSessao();
     render();
   }
@@ -338,7 +345,8 @@
     var app = document.getElementById("app");
     var html = "";
 
-    html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div></header>';
+    html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div>' +
+      '<p style="font-size:12px;opacity:.6;margin:2px 0 0">' + formatarNumero(state.contadorGlobal || 0) + " " + plural(state.contadorGlobal || 0, "pacote separado neste aparelho", "pacotes separados neste aparelho") + "</p></header>";
 
     html += '<div class="tabs">' +
       tabBtn("escanear", "\u{1F4F7} C\u00e2mera") +
