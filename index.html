@@ -283,6 +283,13 @@
     state.statusCamera = "idle";
   }
 
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden && streamAtual) {
+      pararCamera();
+      render();
+    }
+  });
+
   function processarCodigoLido(codigo) {
     var agora = Date.now();
     if (ultimoCodigo.codigo === codigo && agora - ultimoCodigo.ts < 2500) return;
@@ -326,7 +333,13 @@
       tick();
     }).catch(function (e) {
       state.statusCamera = "erro";
-      state.erroCamera = "permissão negada ou bloqueada. detalhe técnico: " + e.message;
+      if (e.name === "NotReadableError") {
+        state.erroCamera = "a c\u00e2mera parece estar em uso por outro app ou aba. Feche outros apps que usem c\u00e2mera (ou feche e abra o navegador de novo) e tente de novo. Detalhe t\u00e9cnico: " + e.message;
+      } else if (e.name === "NotFoundError" || e.name === "OverconstrainedError") {
+        state.erroCamera = "n\u00e3o encontrei nenhuma c\u00e2mera dispon\u00edvel nesse aparelho. Detalhe t\u00e9cnico: " + e.message;
+      } else {
+        state.erroCamera = "permiss\u00e3o negada ou bloqueada pelo ambiente. Detalhe t\u00e9cnico: " + e.message;
+      }
       render();
     });
   }
