@@ -58,7 +58,6 @@
 
 <script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-database-compat.js"></script>
-<script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-storage-compat.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
 <script>
@@ -75,17 +74,26 @@
     appId: "1:807848505946:web:fcf700c76f8a32f1b49e63"
   };
   var fbDb = null;
-  var fbStorage = null;
   try {
     if (window.firebase && firebase.initializeApp) {
       firebase.initializeApp(firebaseConfig);
       fbDb = firebase.database();
-      fbStorage = firebase.storage();
     }
   } catch (e) {
     fbDb = null;
-    fbStorage = null;
   }
+
+  // ---------- Cloudinary (armazenamento das fotos) ----------
+  // Preencha com os dados da sua conta Cloudinary (Settings > Upload > Upload presets,
+  // crie um preset com Signing Mode = Unsigned). Enquanto estiver com os valores de
+  // exemplo abaixo, o app roda normal, só as fotos ficam desativadas.
+  var CLOUDINARY_CLOUD_NAME = "debey3jdv";
+  var CLOUDINARY_UPLOAD_PRESET = "Simplificando as Entregas";
+  var cloudinaryPronto = !!(
+    CLOUDINARY_CLOUD_NAME && CLOUDINARY_UPLOAD_PRESET &&
+    CLOUDINARY_CLOUD_NAME.indexOf("COLE_AQUI") === -1 &&
+    CLOUDINARY_UPLOAD_PRESET.indexOf("COLE_AQUI") === -1
+  );
   function sanitizarChaveFirebase(s) {
     return (s || "").replace(/[.#$\[\]\/]/g, "-").trim();
   }
@@ -126,12 +134,41 @@
   }
 
   function subirFoto(blob, caminho) {
-    var ref = fbStorage.ref().child(caminho);
-    return ref.put(blob).then(function (snap) { return snap.ref.getDownloadURL(); });
+    var semExtensao = caminho.replace(/\.[a-z0-9]+$/i, "");
+    var partes = semExtensao.split("/");
+    var nomeBase = partes.pop();
+    var pasta = partes.join("/");
+    // Sufixo único: o preset do Cloudinary está com "Overwrite: false", então
+    // reenviar pro mesmo public_id (ex: tirar a foto de novo do mesmo pacote)
+    // NÃO substituiria a imagem antiga — o Cloudinary só devolveria a antiga
+    // de novo, calado, como se tivesse dado certo. Com o timestamp aqui, cada
+    // envio vira um arquivo realmente novo, e o app sempre usa a URL do envio
+    // mais recente (é essa URL que fica salva no Firebase).
+    var nomeArquivo = nomeBase + "_" + Date.now();
+
+    var formData = new FormData();
+    formData.append("file", blob, nomeArquivo + ".jpg");
+    formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+    formData.append("folder", pasta);
+    formData.append("public_id", nomeArquivo);
+
+    return fetch("https://api.cloudinary.com/v1_1/" + CLOUDINARY_CLOUD_NAME + "/image/upload", {
+      method: "POST",
+      body: formData
+    }).then(function (resp) {
+      if (!resp.ok) {
+        return resp.text().then(function (texto) {
+          throw new Error("Cloudinary respondeu " + resp.status + ": " + texto);
+        });
+      }
+      return resp.json();
+    }).then(function (dados) {
+      return dados.secure_url;
+    });
   }
 
   function capturarFotoPacote(linhaId) {
-    if (!fbStorage || !fbDb || !state.minhaRota || !state.linhasParseadas) return;
+    if (!cloudinaryPronto || !fbDb || !state.minhaRota || !state.linhasParseadas) return;
     var linha = state.linhasParseadas.find(function (l) { return l.id === linhaId; });
     if (!linha || !linha.codigo) return;
     var inputEl = document.createElement("input");
@@ -154,13 +191,15 @@
           rua: linha.rua, numero: linha.numero, nome: linha.nome || "", quemRecebeu: quemRecebeu,
           fotoPacoteUrl: url, chave: chave, ts: Date.now()
         });
-      }).catch(function () {});
+      }).catch(function (err) {
+        alert("Não consegui enviar a foto do pacote. Tente de novo.\n\n" + (err && err.message ? err.message : err));
+      });
     };
     inputEl.click();
   }
 
   function capturarFotoFachada(ruaObj, ruaTextoOriginal, numero) {
-    if (!fbStorage || !fbDb || !state.minhaRota) return;
+    if (!cloudinaryPronto || !fbDb || !state.minhaRota) return;
     var inputEl = document.createElement("input");
     inputEl.type = "file";
     inputEl.accept = "image/*";
@@ -179,7 +218,9 @@
         fbDb.ref("lotes/" + chaveRota + "/fachadas/" + data + "/" + chave).set({
           rua: nomeRua, numero: numero, fotoFachadaUrl: url, ts: Date.now()
         });
-      }).catch(function () {});
+      }).catch(function (err) {
+        alert("Não consegui enviar a foto da fachada. Tente de novo.\n\n" + (err && err.message ? err.message : err));
+      });
     };
     inputEl.click();
   }
@@ -387,20 +428,17 @@
   }
 
   function limparFotosAntigas(chaveRota) {
-    if (!fbDb || !fbStorage) return;
+    // As fotos agora ficam no Cloudinary via upload "unsigned", que não dá pra
+    // apagar direto pelo navegador sem expor a API secret da conta. Aqui só
+    // limpamos os registros antigos do Firebase; as imagens em si continuam no
+    // Cloudinary (dá pra apagar manualmente de vez em quando pelo Media Library,
+    // se quiser liberar espaço).
+    if (!fbDb) return;
     ["entregas", "fachadas"].forEach(function (secao) {
       fbDb.ref("lotes/" + chaveRota + "/" + secao).once("value").then(function (snap) {
         var porData = snap.val() || {};
         Object.keys(porData).forEach(function (dataStr) {
           if (diasEntre(dataStr, dataDeHoje()) <= 2) return;
-          var itens = porData[dataStr] || {};
-          Object.keys(itens).forEach(function (chaveItem) {
-            var item = itens[chaveItem];
-            var caminhoFoto = secao === "entregas" ? item.fotoPacoteUrl : item.fotoFachadaUrl;
-            if (caminhoFoto) {
-              try { fbStorage.refFromURL(caminhoFoto).delete().catch(function () {}); } catch (e) {}
-            }
-          });
           fbDb.ref("lotes/" + chaveRota + "/" + secao + "/" + dataStr).remove();
         });
       }).catch(function () {});
@@ -870,7 +908,7 @@
     var resultado = calcularResultado();
     html += renderResumoBar(resultado);
 
-    if (fbStorage && state.minhaRota) {
+    if (cloudinaryPronto && state.minhaRota) {
       html += '<button data-action="baixar-zip" class="btn-primary" style="margin-bottom:12px"' + (state.baixandoZip ? " disabled" : "") + ">" +
         (state.baixandoZip ? "Preparando o zip..." : "\u{1F4E5} Baixar fotos de hoje (zip, em ordem)") + "</button>";
     }
