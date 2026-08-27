@@ -480,8 +480,8 @@
 
     var contadorAtivo = !!(fbDb && state.minhaRota);
     html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div>' +
-      '<p style="font-size:12px;opacity:.6;margin:2px 0 0">' + formatarNumero(state.contadorGlobal || 0) + " " +
-      (contadorAtivo ? plural(state.contadorGlobal || 0, "pacote separado no galp\u00e3o", "pacotes separados no galp\u00e3o") : plural(state.contadorGlobal || 0, "pacote separado neste aparelho", "pacotes separados neste aparelho")) +
+      '<p style="font-size:12px;opacity:.6;margin:2px 0 0">' + formatarNumero(state.contadorGlobal || 0) + " \u00b7 " +
+      (contadorAtivo ? "Todos os pacotes processados no galp\u00e3o" : "Pacotes processados neste aparelho") +
       "</p></header>";
 
     html += '<div class="tabs">' +
