@@ -58,6 +58,8 @@
 
 <script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-storage-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 
 <script>
 (function () {
@@ -73,16 +75,125 @@
     appId: "1:807848505946:web:fcf700c76f8a32f1b49e63"
   };
   var fbDb = null;
+  var fbStorage = null;
   try {
     if (window.firebase && firebase.initializeApp) {
       firebase.initializeApp(firebaseConfig);
       fbDb = firebase.database();
+      fbStorage = firebase.storage();
     }
   } catch (e) {
     fbDb = null;
+    fbStorage = null;
   }
   function sanitizarChaveFirebase(s) {
     return (s || "").replace(/[.#$\[\]\/]/g, "-").trim();
+  }
+  function dataDeHoje() {
+    var d = new Date();
+    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+  }
+  function diasEntre(dataStr1, dataStr2) {
+    var a = new Date(dataStr1 + "T00:00:00");
+    var b = new Date(dataStr2 + "T00:00:00");
+    return Math.round((b - a) / 86400000);
+  }
+  function chaveOrdenavel(ruaNome, numero) {
+    var n = parseInt(numero, 10);
+    var numPad = isNaN(n) ? "999999" : String(n).padStart(6, "0");
+    var ruaChave = normalizar(ruaNome).replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
+    return ruaChave + "_" + numPad;
+  }
+  function comprimirImagem(file, maxLado, qualidade) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      var url = URL.createObjectURL(file);
+      img.onload = function () {
+        var w = img.width, h = img.height;
+        if (w >= h && w > maxLado) { h = Math.round((h * maxLado) / w); w = maxLado; }
+        else if (h > w && h > maxLado) { w = Math.round((w * maxLado) / h); h = maxLado; }
+        var canvas = document.createElement("canvas");
+        canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        canvas.toBlob(function (blob) {
+          URL.revokeObjectURL(url);
+          if (blob) resolve(blob); else reject(new Error("falha ao comprimir"));
+        }, "image/jpeg", qualidade || 0.7);
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error("falha ao carregar imagem")); };
+      img.src = url;
+    });
+  }
+
+  function subirFoto(blob, caminho) {
+    var ref = fbStorage.ref().child(caminho);
+    return ref.put(blob).then(function (snap) { return snap.ref.getDownloadURL(); });
+  }
+
+  function capturarFotoPacote(linhaId) {
+    if (!fbStorage || !fbDb || !state.minhaRota || !state.linhasParseadas) return;
+    var linha = state.linhasParseadas.find(function (l) { return l.id === linhaId; });
+    if (!linha || !linha.codigo) return;
+    var inputEl = document.createElement("input");
+    inputEl.type = "file";
+    inputEl.accept = "image/*";
+    inputEl.capture = "environment";
+    inputEl.onchange = function (ev) {
+      var file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+      var data = dataDeHoje();
+      var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
+      var chave = chaveOrdenavel(ruaMatch ? ruaMatch.nome : linha.rua, linha.numero);
+      comprimirImagem(file, 1000, 0.7).then(function (blob) {
+        var caminho = "fotos/" + chaveRota + "/" + data + "/" + chave + "/pacote_" + linha.codigo + ".jpg";
+        return subirFoto(blob, caminho);
+      }).then(function (url) {
+        var quemRecebeu = (state.entregaInfo[linhaId] && state.entregaInfo[linhaId].quemRecebeu) || "";
+        fbDb.ref("lotes/" + chaveRota + "/entregas/" + data + "/" + linha.codigo).set({
+          rua: linha.rua, numero: linha.numero, nome: linha.nome || "", quemRecebeu: quemRecebeu,
+          fotoPacoteUrl: url, chave: chave, ts: Date.now()
+        });
+      }).catch(function () {});
+    };
+    inputEl.click();
+  }
+
+  function capturarFotoFachada(ruaObj, ruaTextoOriginal, numero) {
+    if (!fbStorage || !fbDb || !state.minhaRota) return;
+    var inputEl = document.createElement("input");
+    inputEl.type = "file";
+    inputEl.accept = "image/*";
+    inputEl.capture = "environment";
+    inputEl.onchange = function (ev) {
+      var file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+      var data = dataDeHoje();
+      var nomeRua = ruaObj ? ruaObj.nome : ruaTextoOriginal;
+      var chave = chaveOrdenavel(nomeRua, numero);
+      comprimirImagem(file, 1000, 0.7).then(function (blob) {
+        var caminho = "fotos/" + chaveRota + "/" + data + "/" + chave + "/fachada.jpg";
+        return subirFoto(blob, caminho);
+      }).then(function (url) {
+        fbDb.ref("lotes/" + chaveRota + "/fachadas/" + data + "/" + chave).set({
+          rua: nomeRua, numero: numero, fotoFachadaUrl: url, ts: Date.now()
+        });
+      }).catch(function () {});
+    };
+    inputEl.click();
+  }
+
+  function salvarQuemRecebeu(linhaId, valor) {
+    if (!state.entregaInfo[linhaId]) state.entregaInfo[linhaId] = {};
+    state.entregaInfo[linhaId].quemRecebeu = valor;
+    if (fbDb && state.minhaRota && state.linhasParseadas) {
+      var linha = state.linhasParseadas.find(function (l) { return l.id === linhaId; });
+      if (linha && linha.codigo) {
+        var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+        fbDb.ref("lotes/" + chaveRota + "/entregas/" + dataDeHoje() + "/" + linha.codigo + "/quemRecebeu").set(valor);
+      }
+    }
   }
 
   var PALETA_CORES = ["#E53935", "#FB8C00", "#FDD835", "#43A047", "#00897B", "#1E88E5", "#3949AB", "#8E24AA", "#D81B60", "#6D4C41"];
@@ -182,6 +293,9 @@
     minhaRota: "",
     rotaConectada: false,
     totalRotas: 0,
+    entregaInfo: {},
+    fachadaInfo: {},
+    baixandoZip: false,
     statusCamera: "idle",
     erroCamera: "",
     resultadoScan: null
@@ -258,11 +372,39 @@
   }
   var refPacotesAtual = null;
   var callbackPacotesAtual = null;
+  var refEntregasAtual = null;
+  var callbackEntregasAtual = null;
+  var refFachadasAtual = null;
+  var callbackFachadasAtual = null;
 
   function desconectarRota() {
     if (refPacotesAtual && callbackPacotesAtual) refPacotesAtual.off("value", callbackPacotesAtual);
-    refPacotesAtual = null;
-    callbackPacotesAtual = null;
+    if (refEntregasAtual && callbackEntregasAtual) refEntregasAtual.off("value", callbackEntregasAtual);
+    if (refFachadasAtual && callbackFachadasAtual) refFachadasAtual.off("value", callbackFachadasAtual);
+    refPacotesAtual = null; callbackPacotesAtual = null;
+    refEntregasAtual = null; callbackEntregasAtual = null;
+    refFachadasAtual = null; callbackFachadasAtual = null;
+  }
+
+  function limparFotosAntigas(chaveRota) {
+    if (!fbDb || !fbStorage) return;
+    ["entregas", "fachadas"].forEach(function (secao) {
+      fbDb.ref("lotes/" + chaveRota + "/" + secao).once("value").then(function (snap) {
+        var porData = snap.val() || {};
+        Object.keys(porData).forEach(function (dataStr) {
+          if (diasEntre(dataStr, dataDeHoje()) <= 2) return;
+          var itens = porData[dataStr] || {};
+          Object.keys(itens).forEach(function (chaveItem) {
+            var item = itens[chaveItem];
+            var caminhoFoto = secao === "entregas" ? item.fotoPacoteUrl : item.fotoFachadaUrl;
+            if (caminhoFoto) {
+              try { fbStorage.refFromURL(caminhoFoto).delete().catch(function () {}); } catch (e) {}
+            }
+          });
+          fbDb.ref("lotes/" + chaveRota + "/" + secao + "/" + dataStr).remove();
+        });
+      }).catch(function () {});
+    });
   }
 
   function conectarRota(rota) {
@@ -271,6 +413,34 @@
     if (!fbDb || !rota) return;
     var chaveRota = sanitizarChaveFirebase(rota);
     fbDb.ref("rotas_registradas/" + chaveRota).set(Date.now());
+    limparFotosAntigas(chaveRota);
+
+    var data = dataDeHoje();
+    refEntregasAtual = fbDb.ref("lotes/" + chaveRota + "/entregas/" + data);
+    callbackEntregasAtual = function (snapshot) {
+      var dados = snapshot.val() || {};
+      var novo = {};
+      Object.keys(dados).forEach(function (codigo) {
+        var item = dados[codigo];
+        var linha = state.linhasParseadas && state.linhasParseadas.find(function (l) { return l.codigo === codigo; });
+        if (!linha) return;
+        novo[linha.id] = { quemRecebeu: item.quemRecebeu || "", fotoPacoteUrl: item.fotoPacoteUrl || "" };
+      });
+      state.entregaInfo = novo;
+      render();
+    };
+    refEntregasAtual.on("value", callbackEntregasAtual);
+
+    refFachadasAtual = fbDb.ref("lotes/" + chaveRota + "/fachadas/" + data);
+    callbackFachadasAtual = function (snapshot) {
+      var dados = snapshot.val() || {};
+      var novo = {};
+      Object.keys(dados).forEach(function (chave) { novo[chave] = dados[chave].fotoFachadaUrl || ""; });
+      state.fachadaInfo = novo;
+      render();
+    };
+    refFachadasAtual.on("value", callbackFachadasAtual);
+
     refPacotesAtual = fbDb.ref("lotes/" + chaveRota + "/pacotes");
     var primeiraLeitura = true;
     callbackPacotesAtual = function (snapshot) {
@@ -370,6 +540,77 @@
     state.textoColado = ""; state.linhasParseadas = null; state.pacoteStatus = {};
     salvarSessao();
     render();
+  }
+
+  function baixarFotosDoDia() {
+    if (!fbDb || !state.minhaRota || typeof JSZip === "undefined") return;
+    var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+    var data = dataDeHoje();
+    state.baixandoZip = true;
+    render();
+
+    Promise.all([
+      fbDb.ref("lotes/" + chaveRota + "/entregas/" + data).once("value"),
+      fbDb.ref("lotes/" + chaveRota + "/fachadas/" + data).once("value")
+    ]).then(function (resultados) {
+      var entregas = resultados[0].val() || {};
+      var fachadas = resultados[1].val() || {};
+      var porChave = {};
+
+      Object.keys(entregas).forEach(function (codigo) {
+        var it = entregas[codigo];
+        if (!it.chave) return;
+        if (!porChave[it.chave]) porChave[it.chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null };
+        porChave[it.chave].pacotes.push({ nome: it.nome || it.quemRecebeu || codigo, url: it.fotoPacoteUrl });
+      });
+      Object.keys(fachadas).forEach(function (chave) {
+        var it = fachadas[chave];
+        if (!porChave[chave]) porChave[chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null };
+        porChave[chave].fotoFachadaUrl = it.fotoFachadaUrl;
+      });
+
+      var chavesOrdenadas = Object.keys(porChave).sort();
+      if (chavesOrdenadas.length === 0) {
+        state.baixandoZip = false;
+        render();
+        return;
+      }
+
+      var zip = new JSZip();
+      var buscas = [];
+      chavesOrdenadas.forEach(function (chave, idx) {
+        var g = porChave[chave];
+        var nomePasta = String(idx + 1).padStart(2, "0") + "_" + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero;
+        var pasta = zip.folder(nomePasta);
+        if (g.fotoFachadaUrl) {
+          buscas.push(fetch(g.fotoFachadaUrl).then(function (r) { return r.blob(); }).then(function (b) { pasta.file("fachada.jpg", b); }));
+        }
+        g.pacotes.forEach(function (p) {
+          if (!p.url) return;
+          var nomeArq = sanitizarChaveFirebase(p.nome).replace(/\s+/g, "-") + ".jpg";
+          buscas.push(fetch(p.url).then(function (r) { return r.blob(); }).then(function (b) { pasta.file(nomeArq, b); }));
+        });
+      });
+
+      Promise.all(buscas).then(function () {
+        return zip.generateAsync({ type: "blob" });
+      }).then(function (blob) {
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "fotos-" + chaveRota + "-" + data + ".zip";
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+        state.baixandoZip = false;
+        render();
+      }).catch(function () {
+        state.baixandoZip = false;
+        render();
+      });
+    }).catch(function () {
+      state.baixandoZip = false;
+      render();
+    });
   }
 
   function calcularResultado() {
@@ -582,20 +823,29 @@
         var st = statusDe(item.id);
         var qtdMesmoNumero = contagemPorNumero[item.numero];
         var primeiroDoNumero = idx === 0 || g.itens[idx - 1].numero !== item.numero;
+        var chaveEndereco = chaveOrdenavel(g.ruaNome, item.numero);
+        var temFachada = !!state.fachadaInfo[chaveEndereco];
 
-        if (primeiroDoNumero && qtdMesmoNumero > 1) {
+        if (primeiroDoNumero) {
           var entreguesDoNumero = g.itens.filter(function (it) { return it.numero === item.numero && statusDe(it.id).entregue; }).length;
-          html += '<li style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none">' +
-            '<span style="font-size:13px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
-            '<span style="font-size:12px;opacity:.7"> \u00b7 ' + qtdMesmoNumero + " pacotes \u00b7 " + entreguesDoNumero + "/" + qtdMesmoNumero + " entregues</span></li>";
+          html += '<li style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none;display:flex;align-items:center;gap:8px">' +
+            '<span style="flex:1"><span style="font-size:13px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
+            (qtdMesmoNumero > 1 ? '<span style="font-size:12px;opacity:.7"> \u00b7 ' + qtdMesmoNumero + " pacotes \u00b7 " + entreguesDoNumero + "/" + qtdMesmoNumero + " entregues</span>" : "") + "</span>" +
+            '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFachada ? " ativo-entregue" : "") + '">' +
+            (temFachada ? "\u2713" : "\u{1F4F7}") + " Fachada</button></li>";
         }
 
+        var quemRecebeuAtual = (state.entregaInfo[item.id] && state.entregaInfo[item.id].quemRecebeu) || "";
+        var temFotoPacote = !!(state.entregaInfo[item.id] && state.entregaInfo[item.id].fotoPacoteUrl);
         var recuo = qtdMesmoNumero > 1 ? "8px 12px 8px 26px" : "8px 12px";
         html += '<li style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
-          '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer">' +
+          '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
           '<span' + (st.separado ? ' class="riscado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
-          '<div style="display:flex;gap:6px;margin-top:6px;margin-left:28px">' +
+          '<input data-action="quem-recebeu" data-id="' + item.id + '" value="' + esc(quemRecebeuAtual) + '" placeholder="Quem recebeu (ex: porteiro)" style="width:100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:6px" />' +
+          '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
+          '<button data-action="foto-pacote" data-id="' + item.id + '" class="pill' + (temFotoPacote ? " ativo-entregue" : "") + '">' +
+          (temFotoPacote ? "\u2713" : "\u{1F4F7}") + " Foto</button>" +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="entregue" class="pill' + (st.entregue ? " ativo-entregue" : "") + '">Entregue</button>' +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="devolvido" class="pill' + (st.devolvido ? " ativo-devolvido" : "") + '">Devolvido</button>' +
           "</div></li>";
@@ -619,6 +869,11 @@
 
     var resultado = calcularResultado();
     html += renderResumoBar(resultado);
+
+    if (fbStorage && state.minhaRota) {
+      html += '<button data-action="baixar-zip" class="btn-primary" style="margin-bottom:12px"' + (state.baixandoZip ? " disabled" : "") + ">" +
+        (state.baixandoZip ? "Preparando o zip..." : "\u{1F4E5} Baixar fotos de hoje (zip, em ordem)") + "</button>";
+    }
 
     if (resultado.naoMapeadas.length > 0) {
       html += '<div class="warn-box" style="margin-bottom:12px"><strong>ruas n\u00e3o reconhecidas:</strong> ' + resultado.naoMapeadas.map(esc).join(", ") + ' \u2014 cadastre na aba "Faixas".</div>';
@@ -751,6 +1006,22 @@
         marcarEntrega(el.getAttribute("data-id"), el.getAttribute("data-campo"));
       };
     });
+    app.querySelectorAll('[data-action="foto-pacote"]').forEach(function (el) {
+      el.onclick = function () { capturarFotoPacote(el.getAttribute("data-id")); };
+    });
+    app.querySelectorAll('[data-action="foto-fachada"]').forEach(function (el) {
+      el.onclick = function () { capturarFotoFachada(null, el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
+    });
+    app.querySelectorAll('[data-action="quem-recebeu"]').forEach(function (el) {
+      var id = el.getAttribute("data-id");
+      el.oninput = function () {
+        if (!state.entregaInfo[id]) state.entregaInfo[id] = {};
+        state.entregaInfo[id].quemRecebeu = el.value;
+      };
+      el.onblur = function () { salvarQuemRecebeu(id, el.value); };
+    });
+    var baixarZipBtn = app.querySelector('[data-action="baixar-zip"]');
+    if (baixarZipBtn) baixarZipBtn.onclick = baixarFotosDoDia;
 
     var novoNomeEl = document.getElementById("novoNomeRua");
     if (novoNomeEl) novoNomeEl.oninput = function () { state.novoNomeRua = novoNomeEl.value; };
