@@ -51,6 +51,7 @@
   .pill { font-size: 11px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--paper-light); color: var(--ink); cursor: pointer; font-family: inherit; font-weight: 600; }
   .pill.ativo-entregue { background: var(--ok); border-color: var(--ok); color: var(--paper-light); }
   .pill.ativo-devolvido { background: var(--alert); border-color: var(--alert); color: var(--paper-light); }
+  .pill.ativo-pendente { background: var(--accent); border-color: var(--accent); color: var(--ink); }
 </style>
 </head>
 <body>
@@ -133,19 +134,32 @@
     });
   }
 
-  function subirFoto(blob, caminho) {
-    var semExtensao = caminho.replace(/\.[a-z0-9]+$/i, "");
-    var partes = semExtensao.split("/");
-    var nomeBase = partes.pop();
-    var pasta = partes.join("/");
-    // Sufixo único: o preset do Cloudinary está com "Overwrite: false", então
-    // reenviar pro mesmo public_id (ex: tirar a foto de novo do mesmo pacote)
-    // NÃO substituiria a imagem antiga — o Cloudinary só devolveria a antiga
-    // de novo, calado, como se tivesse dado certo. Com o timestamp aqui, cada
-    // envio vira um arquivo realmente novo, e o app sempre usa a URL do envio
-    // mais recente (é essa URL que fica salva no Firebase).
-    var nomeArquivo = nomeBase + "_" + Date.now();
+  function blobParaBase64(blob) {
+    return new Promise(function (resolve, reject) {
+      var reader = new FileReader();
+      reader.onloadend = function () { resolve(reader.result); };
+      reader.onerror = function () { reject(new Error("falha ao converter foto pra guardar offline")); };
+      reader.readAsDataURL(blob);
+    });
+  }
+  function base64ParaBlob(dataUrl) {
+    var partes = dataUrl.split(",");
+    var mimeMatch = partes[0].match(/data:([^;]+);base64/);
+    var mime = mimeMatch ? mimeMatch[1] : "image/jpeg";
+    var bin = atob(partes[1]);
+    var bytes = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
 
+  // Sufixo único no nome (ver chamadas em capturarFotoPacote/Fachada): o preset
+  // do Cloudinary está com "Overwrite: false", então reenviar pro mesmo
+  // public_id (ex: tirar a foto de novo do mesmo pacote) NÃO substituiria a
+  // imagem antiga — o Cloudinary só devolveria a antiga de novo, calado, como
+  // se tivesse dado certo. Com timestamp no nome, cada envio vira um arquivo
+  // realmente novo, e o app sempre usa a URL do envio mais recente (é essa
+  // URL que fica salva no Firebase).
+  function subirParaCloudinary(blob, pasta, nomeArquivo) {
     var formData = new FormData();
     formData.append("file", blob, nomeArquivo + ".jpg");
     formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
@@ -155,16 +169,110 @@
     return fetch("https://api.cloudinary.com/v1_1/" + CLOUDINARY_CLOUD_NAME + "/image/upload", {
       method: "POST",
       body: formData
+    }).catch(function () {
+      var erroRede = new Error("sem conexão com o Cloudinary agora");
+      erroRede.semConexao = true;
+      throw erroRede;
     }).then(function (resp) {
       if (!resp.ok) {
         return resp.text().then(function (texto) {
-          throw new Error("Cloudinary respondeu " + resp.status + ": " + texto);
+          var erro = new Error("Cloudinary respondeu " + resp.status + ": " + texto);
+          erro.respostaInvalida = true;
+          throw erro;
         });
       }
       return resp.json();
     }).then(function (dados) {
       return dados.secure_url;
     });
+  }
+
+  // ---------- fila de fotos pendentes (offline) ----------
+  function idFila() { return "F" + Date.now() + "-" + Math.random().toString(36).slice(2, 8); }
+  function salvarFila() { salvar("fila-fotos-pendentes", state.filaPendente); }
+  function removerDaFilaPorIdentidade(item) {
+    state.filaPendente = state.filaPendente.filter(function (p) {
+      if (p.tipo !== item.tipo) return true;
+      return item.tipo === "pacote" ? p.linhaId !== item.linhaId : p.chave !== item.chave;
+    });
+  }
+  function pacotePendenteFila(linhaId) {
+    return state.filaPendente.some(function (p) { return p.tipo === "pacote" && p.linhaId === linhaId; });
+  }
+  function fachadaPendenteFila(chave) {
+    return state.filaPendente.some(function (p) { return p.tipo === "fachada" && p.chave === chave; });
+  }
+
+  function gravarFotoNoFirebase(item, url) {
+    if (item.tipo === "pacote") {
+      var quemRecebeu = (state.entregaInfo[item.linhaId] && state.entregaInfo[item.linhaId].quemRecebeu) || item.quemRecebeuSnapshot || "";
+      fbDb.ref("lotes/" + item.chaveRota + "/entregas/" + item.data + "/" + item.codigo).set({
+        rua: item.rua, numero: item.numero, nome: item.nome || "", quemRecebeu: quemRecebeu,
+        fotoPacoteUrl: url, chave: item.chave, ts: Date.now()
+      });
+    } else if (item.tipo === "fachada") {
+      fbDb.ref("lotes/" + item.chaveRota + "/fachadas/" + item.data + "/" + item.chave).set({
+        rua: item.rua, numero: item.numero, fotoFachadaUrl: url, ts: Date.now()
+      });
+    }
+  }
+
+  // Primeira tentativa de envio, logo depois de tirar a foto. Se falhar por
+  // causa de conexão, guarda a foto (em base64) no localStorage pra tentar de
+  // novo mais tarde, em vez de simplesmente perder ou travar o app.
+  function processarEnvioFoto(item, blob) {
+    subirParaCloudinary(blob, item.pasta, item.nomeArquivo).then(function (url) {
+      gravarFotoNoFirebase(item, url);
+      render();
+    }).catch(function (err) {
+      if (err && err.respostaInvalida) {
+        alert("O Cloudinary recusou o envio da foto (não parece falta de conexão, e sim algo de configuração). Me avisa com essa mensagem:\n\n" + err.message);
+        return;
+      }
+      blobParaBase64(blob).then(function (base64) {
+        removerDaFilaPorIdentidade(item);
+        item.id = idFila();
+        item.blobBase64 = base64;
+        item.criadoEm = Date.now();
+        state.filaPendente.push(item);
+        salvarFila();
+        render();
+      }).catch(function () {
+        alert("Não consegui enviar a foto nem guardar ela pra tentar depois. Tire de novo, se der.");
+      });
+    });
+  }
+
+  // Reenvia a fila pendente, um item de cada vez (mais confiável numa conexão
+  // fraca do que mandar tudo junto). Chamada quando a conexão volta, quando o
+  // app volta a ficar visível, no carregamento, e pelo botão manual.
+  function tentarReenviarFila() {
+    if (state.enviandoFila || !cloudinaryPronto || !fbDb) return;
+    if (!state.filaPendente.length) return;
+    state.enviandoFila = true;
+    var pendentes = state.filaPendente.slice();
+
+    function processarProximo(i) {
+      if (i >= pendentes.length) {
+        state.enviandoFila = false;
+        render();
+        return;
+      }
+      var item = pendentes[i];
+      Promise.resolve().then(function () {
+        return subirParaCloudinary(base64ParaBlob(item.blobBase64), item.pasta, item.nomeArquivo);
+      }).then(function (url) {
+        gravarFotoNoFirebase(item, url);
+        state.filaPendente = state.filaPendente.filter(function (p) { return p.id !== item.id; });
+        salvarFila();
+      }).catch(function () {
+        // ainda sem conexão (ou erro passageiro) — deixa na fila, tenta o próximo
+      }).then(function () {
+        render();
+        processarProximo(i + 1);
+      });
+    }
+    processarProximo(0);
   }
 
   function capturarFotoPacote(linhaId) {
@@ -183,16 +291,17 @@
       var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
       var chave = chaveOrdenavel(ruaMatch ? ruaMatch.nome : linha.rua, linha.numero);
       comprimirImagem(file, 1000, 0.7).then(function (blob) {
-        var caminho = "fotos/" + chaveRota + "/" + data + "/" + chave + "/pacote_" + linha.codigo + ".jpg";
-        return subirFoto(blob, caminho);
-      }).then(function (url) {
-        var quemRecebeu = (state.entregaInfo[linhaId] && state.entregaInfo[linhaId].quemRecebeu) || "";
-        fbDb.ref("lotes/" + chaveRota + "/entregas/" + data + "/" + linha.codigo).set({
-          rua: linha.rua, numero: linha.numero, nome: linha.nome || "", quemRecebeu: quemRecebeu,
-          fotoPacoteUrl: url, chave: chave, ts: Date.now()
-        });
-      }).catch(function (err) {
-        alert("Não consegui enviar a foto do pacote. Tente de novo.\n\n" + (err && err.message ? err.message : err));
+        var item = {
+          tipo: "pacote",
+          pasta: "fotos/" + chaveRota + "/" + data + "/" + chave,
+          nomeArquivo: "pacote_" + linha.codigo + "_" + Date.now(),
+          linhaId: linhaId, chaveRota: chaveRota, data: data, codigo: linha.codigo,
+          rua: linha.rua, numero: linha.numero, nome: linha.nome || "", chave: chave,
+          quemRecebeuSnapshot: (state.entregaInfo[linhaId] && state.entregaInfo[linhaId].quemRecebeu) || ""
+        };
+        processarEnvioFoto(item, blob);
+      }).catch(function () {
+        alert("Não consegui preparar a foto (erro ao comprimir a imagem). Tire de novo, se der.");
       });
     };
     inputEl.click();
@@ -212,14 +321,15 @@
       var nomeRua = ruaObj ? ruaObj.nome : ruaTextoOriginal;
       var chave = chaveOrdenavel(nomeRua, numero);
       comprimirImagem(file, 1000, 0.7).then(function (blob) {
-        var caminho = "fotos/" + chaveRota + "/" + data + "/" + chave + "/fachada.jpg";
-        return subirFoto(blob, caminho);
-      }).then(function (url) {
-        fbDb.ref("lotes/" + chaveRota + "/fachadas/" + data + "/" + chave).set({
-          rua: nomeRua, numero: numero, fotoFachadaUrl: url, ts: Date.now()
-        });
-      }).catch(function (err) {
-        alert("Não consegui enviar a foto da fachada. Tente de novo.\n\n" + (err && err.message ? err.message : err));
+        var item = {
+          tipo: "fachada",
+          pasta: "fotos/" + chaveRota + "/" + data + "/" + chave,
+          nomeArquivo: "fachada_" + Date.now(),
+          chaveRota: chaveRota, data: data, chave: chave, rua: nomeRua, numero: numero
+        };
+        processarEnvioFoto(item, blob);
+      }).catch(function () {
+        alert("Não consegui preparar a foto (erro ao comprimir a imagem). Tire de novo, se der.");
       });
     };
     inputEl.click();
@@ -339,7 +449,9 @@
     baixandoZip: false,
     statusCamera: "idle",
     erroCamera: "",
-    resultadoScan: null
+    resultadoScan: null,
+    filaPendente: [],
+    enviandoFila: false
   };
 
   function carregar(chave, padrao) {
@@ -361,6 +473,7 @@
   });
   state.contadorGlobal = carregar("contador-pacotes-total", 0);
   state.minhaRota = carregar("minha-rota", "");
+  state.filaPendente = carregar("fila-fotos-pendentes", []);
   var sess = carregar("sessao-atual", null);
   if (sess) {
     state.textoColado = sess.texto || "";
@@ -694,6 +807,11 @@
       pararCamera();
       render();
     }
+    if (!document.hidden) tentarReenviarFila();
+  });
+
+  window.addEventListener("online", function () {
+    tentarReenviarFila();
   });
 
   function processarCodigoLido(codigo) {
@@ -768,7 +886,9 @@
     html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div>' +
       '<p style="font-size:12px;opacity:.6;margin:2px 0 0">' + formatarNumero(state.contadorGlobal || 0) + " \u00b7 " +
       (contadorAtivo ? "Todos os pacotes processados no galp\u00e3o" : "Pacotes processados neste aparelho") +
-      "</p></header>";
+      "</p>" +
+      (state.filaPendente.length > 0 ? '<p style="font-size:12px;margin:4px 0 0;color:var(--accent-deep);font-weight:600">\u23f3 ' + state.filaPendente.length + " " + plural(state.filaPendente.length, "foto pendente de envio", "fotos pendentes de envio") + "</p>" : "") +
+      "</header>";
 
     html += '<div class="tabs">' +
       tabBtn("escanear", "\u{1F4F7} C\u00e2mera") +
@@ -863,18 +983,20 @@
         var primeiroDoNumero = idx === 0 || g.itens[idx - 1].numero !== item.numero;
         var chaveEndereco = chaveOrdenavel(g.ruaNome, item.numero);
         var temFachada = !!state.fachadaInfo[chaveEndereco];
+        var fachadaPendente = !temFachada && fachadaPendenteFila(chaveEndereco);
 
         if (primeiroDoNumero) {
           var entreguesDoNumero = g.itens.filter(function (it) { return it.numero === item.numero && statusDe(it.id).entregue; }).length;
           html += '<li style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none;display:flex;align-items:center;gap:8px">' +
             '<span style="flex:1"><span style="font-size:13px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
             (qtdMesmoNumero > 1 ? '<span style="font-size:12px;opacity:.7"> \u00b7 ' + qtdMesmoNumero + " pacotes \u00b7 " + entreguesDoNumero + "/" + qtdMesmoNumero + " entregues</span>" : "") + "</span>" +
-            '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFachada ? " ativo-entregue" : "") + '">' +
-            (temFachada ? "\u2713" : "\u{1F4F7}") + " Fachada</button></li>";
+            '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFachada ? " ativo-entregue" : (fachadaPendente ? " ativo-pendente" : "")) + '">' +
+            (temFachada ? "\u2713" : (fachadaPendente ? "\u23f3" : "\u{1F4F7}")) + " Fachada</button></li>";
         }
 
         var quemRecebeuAtual = (state.entregaInfo[item.id] && state.entregaInfo[item.id].quemRecebeu) || "";
         var temFotoPacote = !!(state.entregaInfo[item.id] && state.entregaInfo[item.id].fotoPacoteUrl);
+        var fotoPacotePendente = !temFotoPacote && pacotePendenteFila(item.id);
         var recuo = qtdMesmoNumero > 1 ? "8px 12px 8px 26px" : "8px 12px";
         html += '<li style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
           '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
@@ -882,8 +1004,8 @@
           '<span' + (st.separado ? ' class="riscado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
           '<input data-action="quem-recebeu" data-id="' + item.id + '" value="' + esc(quemRecebeuAtual) + '" placeholder="Quem recebeu (ex: porteiro)" style="width:100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:6px" />' +
           '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
-          '<button data-action="foto-pacote" data-id="' + item.id + '" class="pill' + (temFotoPacote ? " ativo-entregue" : "") + '">' +
-          (temFotoPacote ? "\u2713" : "\u{1F4F7}") + " Foto</button>" +
+          '<button data-action="foto-pacote" data-id="' + item.id + '" class="pill' + (temFotoPacote ? " ativo-entregue" : (fotoPacotePendente ? " ativo-pendente" : "")) + '">' +
+          (temFotoPacote ? "\u2713" : (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}")) + " Foto</button>" +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="entregue" class="pill' + (st.entregue ? " ativo-entregue" : "") + '">Entregue</button>' +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="devolvido" class="pill' + (st.devolvido ? " ativo-devolvido" : "") + '">Devolvido</button>' +
           "</div></li>";
@@ -907,6 +1029,12 @@
 
     var resultado = calcularResultado();
     html += renderResumoBar(resultado);
+
+    if (state.filaPendente.length > 0) {
+      html += '<button data-action="reenviar-pendentes" class="btn-primary" style="margin-bottom:12px;background:var(--accent);color:var(--ink)"' + (state.enviandoFila ? " disabled" : "") + ">" +
+        (state.enviandoFila ? "Reenviando..." : "⏳ " + state.filaPendente.length + " " + plural(state.filaPendente.length, "foto pendente", "fotos pendentes") + " — tentar agora") +
+        "</button>";
+    }
 
     if (cloudinaryPronto && state.minhaRota) {
       html += '<button data-action="baixar-zip" class="btn-primary" style="margin-bottom:12px"' + (state.baixandoZip ? " disabled" : "") + ">" +
@@ -1060,6 +1188,8 @@
     });
     var baixarZipBtn = app.querySelector('[data-action="baixar-zip"]');
     if (baixarZipBtn) baixarZipBtn.onclick = baixarFotosDoDia;
+    var reenviarBtn = app.querySelector('[data-action="reenviar-pendentes"]');
+    if (reenviarBtn) reenviarBtn.onclick = tentarReenviarFila;
 
     var novoNomeEl = document.getElementById("novoNomeRua");
     if (novoNomeEl) novoNomeEl.oninput = function () { state.novoNomeRua = novoNomeEl.value; };
@@ -1086,6 +1216,7 @@
 
   if (state.minhaRota) conectarRota(state.minhaRota);
   render();
+  if (state.filaPendente.length > 0) tentarReenviarFila();
 })();
 </script>
 </body>
