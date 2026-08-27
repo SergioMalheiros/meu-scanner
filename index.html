@@ -275,16 +275,20 @@
     processarProximo(0);
   }
 
-  function capturarFotoPacote(linhaId) {
-    if (!cloudinaryPronto || !fbDb || !state.minhaRota || !state.linhasParseadas) return;
+  function capturarFotoPacote(linhaId, aoCapturar) {
+    if (!cloudinaryPronto || !fbDb || !state.minhaRota || !state.linhasParseadas) { if (aoCapturar) aoCapturar(); return; }
     var linha = state.linhasParseadas.find(function (l) { return l.id === linhaId; });
-    if (!linha || !linha.codigo) return;
+    if (!linha || !linha.codigo) { if (aoCapturar) aoCapturar(); return; }
     var inputEl = document.createElement("input");
     inputEl.type = "file";
     inputEl.accept = "image/*";
     inputEl.capture = "environment";
     inputEl.onchange = function (ev) {
       var file = ev.target.files && ev.target.files[0];
+      // Dispara o avanço pro próximo da leva ANTES de processar essa foto, pra
+      // câmera do próximo pacote já abrir enquanto essa ainda está comprimindo/
+      // enviando em segundo plano.
+      if (aoCapturar) aoCapturar();
       if (!file) return;
       var chaveRota = sanitizarChaveFirebase(state.minhaRota);
       var data = dataDeHoje();
@@ -333,6 +337,31 @@
       });
     };
     inputEl.click();
+  }
+
+  // Tira a foto de todos os pacotes de um mesmo endereço em sequência, sem
+  // precisar voltar pra lista e apertar "Foto" em cada um: assim que a câmera
+  // fecha depois de um clique, já reabre pro próximo pacote pendente daquele
+  // endereço. Se o navegador não deixar reabrir a câmera sozinho (alguns
+  // exigem um toque a cada vez), a leva simplesmente para por aí — dá pra
+  // terminar manualmente os que faltaram, um por um, como antes.
+  function capturarFotosEmLote(ruaNome, numero) {
+    if (!state.linhasParseadas) return;
+    // Compara pelo nome CANÔNICO da rua (o mesmo que agrupa a lista na tela),
+    // não pelo texto cru colado — assim "R. Mariz e Barros" bate certinho com
+    // o grupo "Rua Mariz e Barros" mesmo que o texto original seja abreviado.
+    var lista = state.linhasParseadas.filter(function (l) {
+      if (l.erro || !l.codigo || String(l.numero) !== String(numero)) return false;
+      var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
+      if (!ruaMatch || ruaMatch.nome !== ruaNome) return false;
+      var tem = !!(state.entregaInfo[l.id] && state.entregaInfo[l.id].fotoPacoteUrl);
+      return !tem && !pacotePendenteFila(l.id);
+    });
+    proximaFotoDoLote(lista, 0);
+  }
+  function proximaFotoDoLote(lista, i) {
+    if (i >= lista.length) return;
+    capturarFotoPacote(lista[i].id, function () { proximaFotoDoLote(lista, i + 1); });
   }
 
   function salvarQuemRecebeu(linhaId, valor) {
@@ -986,10 +1015,16 @@
         var fachadaPendente = !temFachada && fachadaPendenteFila(chaveEndereco);
 
         if (primeiroDoNumero) {
-          var entreguesDoNumero = g.itens.filter(function (it) { return it.numero === item.numero && statusDe(it.id).entregue; }).length;
-          html += '<li style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none;display:flex;align-items:center;gap:8px">' +
+          var itensDoEndereco = g.itens.filter(function (it) { return it.numero === item.numero; });
+          var entreguesDoNumero = itensDoEndereco.filter(function (it) { return statusDe(it.id).entregue; }).length;
+          var semFotoNoEndereco = itensDoEndereco.filter(function (it) {
+            var tem = !!(state.entregaInfo[it.id] && state.entregaInfo[it.id].fotoPacoteUrl);
+            return !tem && !pacotePendenteFila(it.id);
+          }).length;
+          html += '<li style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
             '<span style="flex:1"><span style="font-size:13px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
             (qtdMesmoNumero > 1 ? '<span style="font-size:12px;opacity:.7"> \u00b7 ' + qtdMesmoNumero + " pacotes \u00b7 " + entreguesDoNumero + "/" + qtdMesmoNumero + " entregues</span>" : "") + "</span>" +
+            (qtdMesmoNumero > 1 && semFotoNoEndereco > 0 ? '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill">\u{1F4F7} Todas (' + semFotoNoEndereco + ')</button>' : "") +
             '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFachada ? " ativo-entregue" : (fachadaPendente ? " ativo-pendente" : "")) + '">' +
             (temFachada ? "\u2713" : (fachadaPendente ? "\u23f3" : "\u{1F4F7}")) + " Fachada</button></li>";
         }
@@ -1177,6 +1212,9 @@
     });
     app.querySelectorAll('[data-action="foto-fachada"]').forEach(function (el) {
       el.onclick = function () { capturarFotoFachada(null, el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
+    });
+    app.querySelectorAll('[data-action="foto-lote"]').forEach(function (el) {
+      el.onclick = function () { capturarFotosEmLote(el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
     });
     app.querySelectorAll('[data-action="quem-recebeu"]').forEach(function (el) {
       var id = el.getAttribute("data-id");
