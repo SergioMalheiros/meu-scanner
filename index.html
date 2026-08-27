@@ -448,15 +448,23 @@
       var contagemPorNumero = {};
       g.itens.forEach(function (it) { contagemPorNumero[it.numero] = (contagemPorNumero[it.numero] || 0) + 1; });
 
-      g.itens.forEach(function (item) {
+      g.itens.forEach(function (item, idx) {
         var st = statusDe(item.id);
         var qtdMesmoNumero = contagemPorNumero[item.numero];
-        html += '<li style="padding:8px 12px;border-top:1px solid var(--line)">' +
+        var primeiroDoNumero = idx === 0 || g.itens[idx - 1].numero !== item.numero;
+
+        if (primeiroDoNumero && qtdMesmoNumero > 1) {
+          var entreguesDoNumero = g.itens.filter(function (it) { return it.numero === item.numero && statusDe(it.id).entregue; }).length;
+          html += '<li style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none">' +
+            '<span style="font-size:13px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
+            '<span style="font-size:12px;opacity:.7"> \u00b7 ' + qtdMesmoNumero + " pacotes \u00b7 " + entreguesDoNumero + "/" + qtdMesmoNumero + " entregues</span></li>";
+        }
+
+        var recuo = qtdMesmoNumero > 1 ? "8px 12px 8px 26px" : "8px 12px";
+        html += '<li style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
           '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
-          '<span' + (st.separado ? ' class="riscado"' : "") + ">n\u00ba " + esc(item.numero) +
-          (qtdMesmoNumero > 1 ? ' <span style="font-family:ui-monospace,monospace;font-size:12px;color:var(--accent-deep)">(' + qtdMesmoNumero + " pacotes)</span>" : "") +
-          (item.nome ? " \u00b7 " + esc(item.nome) : "") + "</span></div>" +
+          '<span' + (st.separado ? ' class="riscado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
           '<div style="display:flex;gap:6px;margin-top:6px;margin-left:28px">' +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="entregue" class="pill' + (st.entregue ? " ativo-entregue" : "") + '">Entregue</button>' +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="devolvido" class="pill' + (st.devolvido ? " ativo-devolvido" : "") + '">Devolvido</button>' +
