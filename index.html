@@ -46,7 +46,8 @@
   video { width: 100%; min-height: 240px; object-fit: cover; border-radius: 10px; background: #000; margin-top: 12px; }
   .warn-box { border-radius: 10px; padding: 12px; font-size: 13px; background: var(--alert-light); color: var(--alert); }
   .colorpick-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; font-size: 13px; }
-  .colorpick-row input[type=color] { width: 40px; height: 32px; border-radius: 8px; border: 1px solid var(--line); padding: 2px; background: none; cursor: pointer; }
+  .swatch { width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--line); padding: 0; cursor: pointer; }
+  .swatch-mini { width: 30px; height: 30px; border-radius: 8px; padding: 0; cursor: pointer; }
   .pill { font-size: 11px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--line); background: var(--paper-light); color: var(--ink); cursor: pointer; font-family: inherit; font-weight: 600; }
   .pill.ativo-entregue { background: var(--ok); border-color: var(--ok); color: var(--paper-light); }
   .pill.ativo-devolvido { background: var(--alert); border-color: var(--alert); color: var(--paper-light); }
@@ -59,8 +60,10 @@
 (function () {
   "use strict";
 
+  var PALETA_CORES = ["#E53935", "#FB8C00", "#FDD835", "#43A047", "#00897B", "#1E88E5", "#3949AB", "#8E24AA", "#D81B60", "#6D4C41"];
+
   function coresPadrao() {
-    return { par1: "#1F4E79", par2: "#5B9BD5", impar1: "#8C4A1E", impar2: "#D98A4A" };
+    return { par1: "#1E88E5", par2: "#3949AB", impar1: "#FB8C00", impar2: "#6D4C41" };
   }
 
   function normalizar(s) {
@@ -150,6 +153,7 @@
     linhasParseadas: null,
     pacoteStatus: {},
     novoNomeRua: "",
+    paletaAberta: null,
     statusCamera: "idle",
     erroCamera: "",
     resultadoScan: null
@@ -207,6 +211,14 @@
     rua.cores[campo] = hex;
     salvarMapa();
     render();
+  }
+  function toggleAbrirPaleta(chave) {
+    state.paletaAberta = (state.paletaAberta === chave) ? null : chave;
+    render();
+  }
+  function escolherCor(ruaId, campo, cor) {
+    state.paletaAberta = null;
+    definirCor(ruaId, campo, cor);
   }
 
   function organizarPacotes() {
@@ -558,7 +570,19 @@
   }
 
   function colorPickRow(ruaId, campo, label, valor) {
-    return '<div class="colorpick-row"><span>' + label + '</span><input type="color" data-cor-rua="' + ruaId + '" data-cor-campo="' + campo + '" value="' + esc(valor) + '" /></div>';
+    var chave = ruaId + "|" + campo;
+    var aberta = state.paletaAberta === chave;
+    var html = '<div class="colorpick-row"><span>' + label + '</span>' +
+      '<button data-action="abrir-paleta" data-chave="' + chave + '" class="swatch" style="background:' + valor + '" aria-label="Escolher cor"></button></div>';
+    if (aberta) {
+      html += '<div style="display:flex;flex-wrap:wrap;gap:8px;padding:4px 0 12px;justify-content:flex-end">';
+      PALETA_CORES.forEach(function (cor) {
+        var selecionada = normalizar(cor) === normalizar(valor);
+        html += '<button data-action="escolher-cor" data-rua="' + ruaId + '" data-campo="' + campo + '" data-cor="' + cor + '" class="swatch-mini" style="background:' + cor + ';border:' + (selecionada ? "2.5px solid var(--ink)" : "1px solid var(--line)") + '" aria-label="' + cor + '"></button>';
+      });
+      html += "</div>";
+    }
+    return html;
   }
 
   // ---------- eventos ----------
@@ -601,8 +625,11 @@
     app.querySelectorAll("[data-frag]").forEach(function (el) {
       el.onchange = function () { toggleFragmentar(el.getAttribute("data-frag"), el.checked); };
     });
-    app.querySelectorAll("[data-cor-rua]").forEach(function (el) {
-      el.onchange = function () { definirCor(el.getAttribute("data-cor-rua"), el.getAttribute("data-cor-campo"), el.value); };
+    app.querySelectorAll('[data-action="abrir-paleta"]').forEach(function (el) {
+      el.onclick = function () { toggleAbrirPaleta(el.getAttribute("data-chave")); };
+    });
+    app.querySelectorAll('[data-action="escolher-cor"]').forEach(function (el) {
+      el.onclick = function () { escolherCor(el.getAttribute("data-rua"), el.getAttribute("data-campo"), el.getAttribute("data-cor")); };
     });
   }
 
