@@ -181,6 +181,7 @@
     paletaAberta: null,
     minhaRota: "",
     rotaConectada: false,
+    totalRotas: 0,
     statusCamera: "idle",
     erroCamera: "",
     resultadoScan: null
@@ -269,6 +270,7 @@
     state.rotaConectada = false;
     if (!fbDb || !rota) return;
     var chaveRota = sanitizarChaveFirebase(rota);
+    fbDb.ref("rotas_registradas/" + chaveRota).set(Date.now());
     refPacotesAtual = fbDb.ref("lotes/" + chaveRota + "/pacotes");
     var primeiraLeitura = true;
     callbackPacotesAtual = function (snapshot) {
@@ -334,6 +336,11 @@
     fbDb.ref("contador_global").on("value", function (snap) {
       var v = snap.val();
       if (typeof v === "number") { state.contadorGlobal = v; render(); }
+    });
+    fbDb.ref("rotas_registradas").on("value", function (snap) {
+      var v = snap.val();
+      state.totalRotas = v ? Object.keys(v).length : 0;
+      render();
     });
   }
   function statusDe(id) {
@@ -643,7 +650,9 @@
       '<input id="minhaRotaInput" value="' + esc(state.minhaRota) + '" placeholder="ex: RJ B301-00 088" style="flex:1;min-width:0;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" />' +
       '<button data-action="salvar-rota" style="padding:8px 14px;border-radius:8px;background:var(--ink);color:var(--paper-light);border:none;font-weight:600">Salvar</button>' +
       "</div>" +
-      '<p style="font-size:11px;margin:8px 0 0;color:' + statusCor + '">' + statusTexto + "</p></div>";
+      '<p style="font-size:11px;margin:8px 0 0;color:' + statusCor + '">' + statusTexto + "</p>" +
+      (fbDb && state.totalRotas > 0 ? '<p style="font-size:11px;margin:6px 0 0;opacity:.55">' + formatarNumero(state.totalRotas) + " " + plural(state.totalRotas, "rota diferente j\u00e1 usou", "rotas diferentes j\u00e1 usaram") + " essa ferramenta</p>" : "") +
+      "</div>";
 
     html += '<p class="muted" style="font-size:14px;margin-bottom:16px">Cadastre suas ruas, a faixa completa (se quiser fragmentar) e escolha as cores. Uma vez s\u00f3 \u2014 elas quase n\u00e3o mudam.</p>';
     html += '<div class="card" style="padding:10px;margin-bottom:16px;display:flex;gap:8px">' +
