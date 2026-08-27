@@ -56,9 +56,34 @@
 <body>
 <div id="app"></div>
 
+<script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.17.1/firebase-database-compat.js"></script>
+
 <script>
 (function () {
   "use strict";
+
+  var firebaseConfig = {
+    apiKey: "AIzaSyAcDi0XGCVu1-NUW82rklsrjHLXgxdbss4",
+    authDomain: "simplificando-as-entregas.firebaseapp.com",
+    databaseURL: "https://simplificando-as-entregas-default-rtdb.firebaseio.com",
+    projectId: "simplificando-as-entregas",
+    storageBucket: "simplificando-as-entregas.firebasestorage.app",
+    messagingSenderId: "807848505946",
+    appId: "1:807848505946:web:fcf700c76f8a32f1b49e63"
+  };
+  var fbDb = null;
+  try {
+    if (window.firebase && firebase.initializeApp) {
+      firebase.initializeApp(firebaseConfig);
+      fbDb = firebase.database();
+    }
+  } catch (e) {
+    fbDb = null;
+  }
+  function sanitizarChaveFirebase(s) {
+    return (s || "").replace(/[.#$\[\]\/]/g, "-").trim();
+  }
 
   var PALETA_CORES = ["#E53935", "#FB8C00", "#FDD835", "#43A047", "#00897B", "#1E88E5", "#3949AB", "#8E24AA", "#D81B60", "#6D4C41"];
 
@@ -154,6 +179,8 @@
     pacoteStatus: {},
     novoNomeRua: "",
     paletaAberta: null,
+    minhaRota: "",
+    rotaConectada: false,
     statusCamera: "idle",
     erroCamera: "",
     resultadoScan: null
@@ -177,6 +204,7 @@
     return m;
   });
   state.contadorGlobal = carregar("contador-pacotes-total", 0);
+  state.minhaRota = carregar("minha-rota", "");
   var sess = carregar("sessao-atual", null);
   if (sess) {
     state.textoColado = sess.texto || "";
@@ -227,6 +255,75 @@
     salvarSessao();
     render();
   }
+  var refPacotesAtual = null;
+  var callbackPacotesAtual = null;
+
+  function desconectarRota() {
+    if (refPacotesAtual && callbackPacotesAtual) refPacotesAtual.off("value", callbackPacotesAtual);
+    refPacotesAtual = null;
+    callbackPacotesAtual = null;
+  }
+
+  function conectarRota(rota) {
+    desconectarRota();
+    state.rotaConectada = false;
+    if (!fbDb || !rota) return;
+    var chaveRota = sanitizarChaveFirebase(rota);
+    refPacotesAtual = fbDb.ref("lotes/" + chaveRota + "/pacotes");
+    callbackPacotesAtual = function (snapshot) {
+      state.rotaConectada = true;
+      var dados = snapshot.val() || {};
+      if (!state.linhasParseadas) { render(); return; }
+      var porCodigo = {};
+      state.linhasParseadas.forEach(function (l) { if (!l.erro && l.codigo) porCodigo[l.codigo] = l.id; });
+      var mudou = false;
+      Object.keys(dados).forEach(function (codigo) {
+        var linhaId = porCodigo[codigo];
+        if (!linhaId) return;
+        var remoto = dados[codigo] || {};
+        var local = state.pacoteStatus[linhaId] || { separado: false, entregue: false, devolvido: false };
+        var novo = { separado: !!remoto.separado, entregue: !!remoto.entregue, devolvido: !!remoto.devolvido };
+        if (local.separado !== novo.separado || local.entregue !== novo.entregue || local.devolvido !== novo.devolvido) {
+          state.pacoteStatus[linhaId] = novo;
+          mudou = true;
+        }
+      });
+      if (mudou) salvarSessao();
+      render();
+    };
+    refPacotesAtual.on("value", callbackPacotesAtual, function () { state.rotaConectada = false; render(); });
+  }
+
+  function salvarMinhaRota(rota) {
+    state.minhaRota = rota;
+    salvar("minha-rota", rota);
+    conectarRota(rota);
+    render();
+  }
+
+  function sincronizarPacote(id) {
+    if (!fbDb || !state.minhaRota || !state.linhasParseadas) return;
+    var linha = state.linhasParseadas.find(function (l) { return l.id === id; });
+    if (!linha || !linha.codigo) return;
+    var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+    fbDb.ref("lotes/" + chaveRota + "/pacotes/" + linha.codigo).set(state.pacoteStatus[id]);
+  }
+
+  function incrementarContadorGlobal() {
+    if (fbDb) {
+      fbDb.ref("contador_global").transaction(function (atual) { return (atual || 0) + 1; });
+    } else {
+      state.contadorGlobal = (state.contadorGlobal || 0) + 1;
+      salvar("contador-pacotes-total", state.contadorGlobal);
+    }
+  }
+
+  if (fbDb) {
+    fbDb.ref("contador_global").on("value", function (snap) {
+      var v = snap.val();
+      if (typeof v === "number") { state.contadorGlobal = v; render(); }
+    });
+  }
   function statusDe(id) {
     return state.pacoteStatus[id] || { separado: false, entregue: false, devolvido: false };
   }
@@ -234,10 +331,8 @@
     if (!state.pacoteStatus[id]) state.pacoteStatus[id] = { separado: false, entregue: false, devolvido: false };
     var jaEstava = state.pacoteStatus[id].separado;
     state.pacoteStatus[id].separado = valor;
-    if (valor && !jaEstava) {
-      state.contadorGlobal = (state.contadorGlobal || 0) + 1;
-      salvar("contador-pacotes-total", state.contadorGlobal);
-    }
+    if (valor && !jaEstava) incrementarContadorGlobal();
+    sincronizarPacote(id);
     salvarSessao();
     render();
   }
@@ -248,6 +343,7 @@
     atual[campo] = ligar;
     if (campo === "entregue" && ligar) atual.devolvido = false;
     if (campo === "devolvido" && ligar) atual.entregue = false;
+    sincronizarPacote(id);
     salvarSessao();
     render();
   }
@@ -370,8 +466,11 @@
     var app = document.getElementById("app");
     var html = "";
 
+    var contadorAtivo = !!(fbDb && state.minhaRota);
     html += '<header><div class="titlerow"><span style="font-size:22px">\u{1F4E6}</span><h1>Simplificando as Entregas</h1></div>' +
-      '<p style="font-size:12px;opacity:.6;margin:2px 0 0">' + formatarNumero(state.contadorGlobal || 0) + " " + plural(state.contadorGlobal || 0, "pacote separado neste aparelho", "pacotes separados neste aparelho") + "</p></header>";
+      '<p style="font-size:12px;opacity:.6;margin:2px 0 0">' + formatarNumero(state.contadorGlobal || 0) + " " +
+      (contadorAtivo ? plural(state.contadorGlobal || 0, "pacote separado no galp\u00e3o", "pacotes separados no galp\u00e3o") : plural(state.contadorGlobal || 0, "pacote separado neste aparelho", "pacotes separados neste aparelho")) +
+      "</p></header>";
 
     html += '<div class="tabs">' +
       tabBtn("escanear", "\u{1F4F7} C\u00e2mera") +
@@ -517,7 +616,24 @@
   }
 
   function renderMapa() {
-    var html = '<p class="muted" style="font-size:14px;margin-bottom:16px">Cadastre suas ruas, a faixa completa (se quiser fragmentar) e escolha as cores. Uma vez s\u00f3 \u2014 elas quase n\u00e3o mudam.</p>';
+    var statusTexto = !fbDb
+      ? "sem conex\u00e3o com o Firebase \u2014 tudo funciona s\u00f3 neste aparelho."
+      : !state.minhaRota
+      ? "defina seu c\u00f3digo pra compartilhar o progresso com quem mais estiver nessa rota."
+      : state.rotaConectada
+      ? "conectado \u2014 compartilhando com quem usar esse mesmo c\u00f3digo."
+      : "sem conex\u00e3o em tempo real agora (funcionando localmente).";
+    var statusCor = (fbDb && state.minhaRota && state.rotaConectada) ? "var(--ok)" : "var(--alert)";
+
+    var html = '<div class="card" style="padding:12px;margin-bottom:16px">' +
+      '<p style="font-size:11px;font-weight:600;margin:0 0 6px;opacity:.65">C\u00d3DIGO DA SUA ROTA</p>' +
+      '<div style="display:flex;gap:8px">' +
+      '<input id="minhaRotaInput" value="' + esc(state.minhaRota) + '" placeholder="ex: RJ B301-00 088" style="flex:1;min-width:0;padding:8px;border-radius:8px;border:1px solid var(--line);font-size:14px;color:var(--ink);background:var(--paper-light)" />' +
+      '<button data-action="salvar-rota" style="padding:8px 14px;border-radius:8px;background:var(--ink);color:var(--paper-light);border:none;font-weight:600">Salvar</button>' +
+      "</div>" +
+      '<p style="font-size:11px;margin:8px 0 0;color:' + statusCor + '">' + statusTexto + "</p></div>";
+
+    html += '<p class="muted" style="font-size:14px;margin-bottom:16px">Cadastre suas ruas, a faixa completa (se quiser fragmentar) e escolha as cores. Uma vez s\u00f3 \u2014 elas quase n\u00e3o mudam.</p>';
     html += '<div class="card" style="padding:10px;margin-bottom:16px;display:flex;gap:8px">' +
       '<input id="novoNomeRua" style="flex:1;min-width:0;background:transparent;border:none;font-size:14px;padding:8px;color:var(--ink)" value="' + esc(state.novoNomeRua) + '" placeholder="Nome da nova rua" />' +
       '<button data-action="add-rua" style="border-radius:8px;padding:0 14px;background:var(--accent);border:none;font-weight:700">+</button></div>';
@@ -619,6 +735,11 @@
     if (novoNomeEl) novoNomeEl.oninput = function () { state.novoNomeRua = novoNomeEl.value; };
     var addRuaBtn = app.querySelector('[data-action="add-rua"]');
     if (addRuaBtn) addRuaBtn.onclick = adicionarRua;
+    var salvarRotaBtn = app.querySelector('[data-action="salvar-rota"]');
+    if (salvarRotaBtn) salvarRotaBtn.onclick = function () {
+      var v = document.getElementById("minhaRotaInput").value.trim();
+      if (v) salvarMinhaRota(v);
+    };
     app.querySelectorAll('[data-action="del-rua"]').forEach(function (el) {
       el.onclick = function () { removerRua(el.getAttribute("data-id")); };
     });
@@ -633,6 +754,7 @@
     });
   }
 
+  if (state.minhaRota) conectarRota(state.minhaRota);
   render();
 })();
 </script>
