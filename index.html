@@ -270,6 +270,7 @@
     if (!fbDb || !rota) return;
     var chaveRota = sanitizarChaveFirebase(rota);
     refPacotesAtual = fbDb.ref("lotes/" + chaveRota + "/pacotes");
+    var primeiraLeitura = true;
     callbackPacotesAtual = function (snapshot) {
       state.rotaConectada = true;
       var dados = snapshot.val() || {};
@@ -288,6 +289,17 @@
           mudou = true;
         }
       });
+      if (primeiraLeitura) {
+        primeiraLeitura = false;
+        state.linhasParseadas.forEach(function (l) {
+          if (l.erro || !l.codigo) return;
+          var localSt = state.pacoteStatus[l.id];
+          if (!localSt) return;
+          var remotoSt = dados[l.codigo] || {};
+          var atrasado = (localSt.separado && !remotoSt.separado) || (localSt.entregue && !remotoSt.entregue) || (localSt.devolvido && !remotoSt.devolvido);
+          if (atrasado) fbDb.ref("lotes/" + chaveRota + "/pacotes/" + l.codigo).set(localSt);
+        });
+      }
       if (mudou) salvarSessao();
       render();
     };
