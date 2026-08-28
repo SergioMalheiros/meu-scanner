@@ -279,6 +279,7 @@
     if (!cloudinaryPronto || !fbDb || !state.minhaRota || !state.linhasParseadas) return;
     var linha = state.linhasParseadas.find(function (l) { return l.id === linhaId; });
     if (!linha || !linha.codigo) return;
+    definirFoco("pacote-" + linhaId);
     var inputEl = document.createElement("input");
     inputEl.type = "file";
     inputEl.accept = "image/*";
@@ -309,6 +310,9 @@
 
   function capturarFotoFachada(ruaObj, ruaTextoOriginal, numero) {
     if (!cloudinaryPronto || !fbDb || !state.minhaRota) return;
+    var nomeRua = ruaObj ? ruaObj.nome : ruaTextoOriginal;
+    var chave = chaveOrdenavel(nomeRua, numero);
+    definirFoco("endereco-" + chave);
     var inputEl = document.createElement("input");
     inputEl.type = "file";
     inputEl.accept = "image/*";
@@ -318,8 +322,6 @@
       if (!file) return;
       var chaveRota = sanitizarChaveFirebase(state.minhaRota);
       var data = dataDeHoje();
-      var nomeRua = ruaObj ? ruaObj.nome : ruaTextoOriginal;
-      var chave = chaveOrdenavel(nomeRua, numero);
       comprimirImagem(file, 1000, 0.7).then(function (blob) {
         var item = {
           tipo: "fachada",
@@ -363,6 +365,7 @@
       return !tem && !pacotePendenteFila(l.id);
     });
     if (!itens.length) return;
+    definirFoco("endereco-" + chaveOrdenavel(ruaNome, numero));
     state.loteFoto = { ruaNome: ruaNome, numero: numero, itens: itens, fotos: [], statusCamera: "pedindo", erro: "" };
     render();
     iniciarCameraLote();
@@ -370,6 +373,12 @@
 
   function iniciarCameraLote() {
     if (!state.loteFoto) return;
+    // Libera qualquer câmera que tenha ficado presa de uma tentativa anterior
+    // (inclusive a do scanner, se por algum motivo ainda estiver aberta) antes
+    // de pedir uma nova — pedir uma câmera com outra ainda ativa é uma causa
+    // comum do navegador recusar o pedido.
+    pararCameraLote();
+    if (streamAtual) pararCamera();
     state.loteFoto.statusCamera = "pedindo";
     state.loteFoto.erro = "";
     render();
@@ -635,6 +644,21 @@
     salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus });
   }
 
+  // Foco a restaurar depois de tirar uma foto. A câmera nativa do celular tira
+  // o navegador de tela (às vezes chega a recarregar a página, dependendo do
+  // aparelho) — ao voltar, sem isso a lista sempre pulava pro topo, obrigando
+  // a rolar tudo de novo até achar o pacote em que estava. Guarda qual
+  // pacote/endereço estava em uso ANTES de abrir a câmera (também no
+  // localStorage, pra sobreviver mesmo se a página recarregar de verdade) e,
+  // na primeira renderização depois, rola até ele e descarta — não deve
+  // "grudar" nas renderizações seguintes (ex: quando o ajudante atualiza algo
+  // pelo Firebase), só nessa próxima.
+  var focoAncora = null;
+  function definirFoco(id) {
+    focoAncora = id;
+    salvar("foco-ancora", id);
+  }
+
   state.mapaRuas = carregar("mapa-ruas", []).map(function (r) {
     var m = Object.assign({ cores: coresPadrao() }, r, { cores: r.cores || coresPadrao() });
     if (m.faixaCompleta && m.fragmentar === undefined) m.fragmentar = true;
@@ -644,6 +668,7 @@
   state.contadorGlobal = carregar("contador-pacotes-total", 0);
   state.minhaRota = carregar("minha-rota", "");
   state.filaPendente = carregar("fila-fotos-pendentes", []);
+  focoAncora = carregar("foco-ancora", null);
   var sess = carregar("sessao-atual", null);
   if (sess) {
     state.textoColado = sess.texto || "";
@@ -1015,6 +1040,9 @@
   }
 
   function iniciarCamera() {
+    // Mesma ideia da câmera em lote: solta qualquer câmera presa antes de
+    // pedir esta, pra não disputar o hardware com uma câmera que ficou aberta.
+    if (streamLote) pararCameraLote();
     state.statusCamera = "pedindo"; state.erroCamera = ""; state.resultadoScan = null; render();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       state.statusCamera = "erro"; state.erroCamera = "esse navegador não expõe acesso à câmera aqui."; render(); return;
@@ -1104,6 +1132,17 @@
         v2.srcObject = streamAtual;
         v2.play().catch(function () {});
       }
+    }
+
+    // Volta o scroll pro pacote/endereço onde a foto foi tirada, em vez de
+    // deixar a lista voltar pro topo (só usa uma vez e descarta — ver
+    // comentário perto de "definirFoco").
+    if (focoAncora) {
+      var idFoco = focoAncora;
+      focoAncora = null;
+      salvar("foco-ancora", null);
+      var elFoco = document.getElementById(idFoco);
+      if (elFoco) elFoco.scrollIntoView({ block: "center" });
     }
   }
 
@@ -1252,7 +1291,7 @@
             var qv = (state.entregaInfo[itensDoEndereco[qi].id] && state.entregaInfo[itensDoEndereco[qi].id].quemRecebeu) || "";
             if (qv) { quemRecebeuEndereco = qv; break; }
           }
-          html += '<li style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+          html += '<li id="endereco-' + chaveEndereco + '" style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
             '<span style="flex:1"><span style="font-size:13px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
             (qtdMesmoNumero > 1 ? '<span style="font-size:12px;opacity:.7"> \u00b7 ' + qtdMesmoNumero + " pacotes \u00b7 " + entreguesDoNumero + "/" + qtdMesmoNumero + " entregues</span>" : "") + "</span>" +
             (qtdMesmoNumero > 1 && semFotoNoEndereco > 0 ? '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill">\u{1F4F7} Todas (' + semFotoNoEndereco + ')</button>' : "") +
@@ -1266,7 +1305,7 @@
         var temFotoPacote = !!(state.entregaInfo[item.id] && state.entregaInfo[item.id].fotoPacoteUrl);
         var fotoPacotePendente = !temFotoPacote && pacotePendenteFila(item.id);
         var recuo = qtdMesmoNumero > 1 ? "8px 12px 8px 26px" : "8px 12px";
-        html += '<li style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
+        html += '<li id="pacote-' + item.id + '" style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
           '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
           '<span' + (st.separado ? ' class="riscado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
