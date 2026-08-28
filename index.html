@@ -1014,8 +1014,18 @@
       Promise.all(itensParaBuscar.map(function (it) {
         return fetch(it.url).then(function (r) { return r.blob(); }).catch(function () { return null; });
       })).then(function (blobs) {
+        // A ordem do nome da pasta já tava certa, mas o Google Fotos não
+        // agrupa "por nome" — ele ordena os álbuns/pastas pela data da foto
+        // mais recente ali dentro, e as fotos daqui não carregam data (viram
+        // canvas na hora de comprimir/tirar, perdem o EXIF). Sem data própria,
+        // ele cai pra data do arquivo. Aqui a gente CARIMBA essa data
+        // explicitamente no zip, decrescendo uma a uma na ordem certa (a
+        // primeira pasta fica com a foto "mais recente", a última com a mais
+        // antiga) — é o que faz o Google Fotos (que mostra o mais recente
+        // primeiro) respeitar a mesma ordem das pastas.
+        var agora = Date.now();
         itensParaBuscar.forEach(function (it, i) {
-          if (blobs[i]) zip.folder(it.nomePasta).file(it.nomeArquivo, blobs[i]);
+          if (blobs[i]) zip.folder(it.nomePasta).file(it.nomeArquivo, blobs[i], { date: new Date(agora - i * 10000) });
         });
         return zip.generateAsync({ type: "blob" });
       }).then(function (blob) {
