@@ -211,7 +211,10 @@
         fotoPacoteUrl: url, chave: item.chave, ts: Date.now()
       });
     } else if (item.tipo === "fachada") {
-      fbDb.ref("lotes/" + item.chaveRota + "/fachadas/" + item.data + "/" + item.chave).set({
+      // Sem data no caminho de propósito: a fachada de um prédio não muda de
+      // um dia pro outro, então fica registrada pra sempre (por rota +
+      // endereço) e é reaproveitada automaticamente quando a rota se repete.
+      fbDb.ref("lotes/" + item.chaveRota + "/fachadas_permanentes/" + item.chave).set({
         rua: item.rua, numero: item.numero, fotoFachadaUrl: url, ts: Date.now()
       });
     }
@@ -340,6 +343,12 @@
     if (!cloudinaryPronto || !fbDb || !state.minhaRota) return;
     var nomeRua = ruaObj ? ruaObj.nome : ruaTextoOriginal;
     var chave = chaveOrdenavel(nomeRua, numero);
+    // Fachada agora é permanente (vale pra rota inteira, em qualquer dia) —
+    // se já tem uma registrada, confirma antes de substituir pra evitar
+    // apagar sem querer uma foto boa com um toque sem querer no botão.
+    if (state.fachadaInfo[chave] && !confirm("Essa fachada já está registrada (vale pra toda a rota, em qualquer dia). Quer tirar outra foto e substituir?")) {
+      return;
+    }
     definirFoco("endereco-" + chave);
     var inputEl = document.createElement("input");
     inputEl.type = "file";
@@ -349,13 +358,12 @@
       var file = ev.target.files && ev.target.files[0];
       if (!file) return;
       var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-      var data = dataDeHoje();
       comprimirImagem(file, 1000, 0.7).then(function (blob) {
         var item = {
           tipo: "fachada",
-          pasta: "fotos/" + chaveRota + "/" + data + "/" + chave,
+          pasta: "fotos/" + chaveRota + "/fachadas/" + chave,
           nomeArquivo: "fachada_" + Date.now(),
-          chaveRota: chaveRota, data: data, chave: chave, rua: nomeRua, numero: numero
+          chaveRota: chaveRota, chave: chave, rua: nomeRua, numero: numero
         };
         processarEnvioFoto(item, blob);
       }).catch(function () {
@@ -789,8 +797,12 @@
     // limpamos os registros antigos do Firebase; as imagens em si continuam no
     // Cloudinary (dá pra apagar manualmente de vez em quando pelo Media Library,
     // se quiser liberar espaço).
+    // "fachadas_permanentes" fica de fora de propósito: não é organizado por
+    // data (é por endereço, pra sempre), então não faz sentido limpar por
+    // idade — e limpar aqui usando essa mesma lógica ia apagar tudo por
+    // engano (a chave lá é do endereço, não uma data, e viraria NaN dia).
     if (!fbDb) return;
-    ["entregas", "fachadas"].forEach(function (secao) {
+    ["entregas"].forEach(function (secao) {
       fbDb.ref("lotes/" + chaveRota + "/" + secao).once("value").then(function (snap) {
         var porData = snap.val() || {};
         Object.keys(porData).forEach(function (dataStr) {
@@ -825,7 +837,7 @@
     };
     refEntregasAtual.on("value", callbackEntregasAtual);
 
-    refFachadasAtual = fbDb.ref("lotes/" + chaveRota + "/fachadas/" + data);
+    refFachadasAtual = fbDb.ref("lotes/" + chaveRota + "/fachadas_permanentes");
     callbackFachadasAtual = function (snapshot) {
       var dados = snapshot.val() || {};
       var novo = {};
@@ -945,7 +957,7 @@
 
     Promise.all([
       fbDb.ref("lotes/" + chaveRota + "/entregas/" + data).once("value"),
-      fbDb.ref("lotes/" + chaveRota + "/fachadas/" + data).once("value")
+      fbDb.ref("lotes/" + chaveRota + "/fachadas_permanentes").once("value")
     ]).then(function (resultados) {
       var entregas = resultados[0].val() || {};
       var fachadas = resultados[1].val() || {};
@@ -961,10 +973,13 @@
         // Guarda também no nível do endereço, pra ir no nome da pasta do zip.
         if (!porChave[it.chave].quemRecebeu && it.quemRecebeu) porChave[it.chave].quemRecebeu = it.quemRecebeu;
       });
+      // "fachadas" aqui é o acervo permanente da rota inteira (todos os
+      // endereços já fotografados, de qualquer dia) — só entra no zip de hoje
+      // a fachada de quem também teve pacote entregue hoje (por isso não cria
+      // uma pasta nova aqui, só complementa uma que já existe pelas entregas).
       Object.keys(fachadas).forEach(function (chave) {
-        var it = fachadas[chave];
-        if (!porChave[chave]) porChave[chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null, quemRecebeu: "" };
-        porChave[chave].fotoFachadaUrl = it.fotoFachadaUrl;
+        if (!porChave[chave]) return;
+        porChave[chave].fotoFachadaUrl = fachadas[chave].fotoFachadaUrl;
       });
 
       var chavesOrdenadas = Object.keys(porChave).sort();
@@ -1210,6 +1225,10 @@
       tabBtn("escanear", "\u{1F4F7} C\u00e2mera") +
       tabBtn("separar", "\u{1F4E6} Hoje") + tabBtn("mapa", "\u{1F4CD} Faixas") + '</div>';
 
+    if (state.aba === "separar" && state.linhasParseadas) {
+      html += '<button class="btn-primary" data-action="limpar-sessao" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7;margin:10px 0 14px">\u21bb Limpar e come\u00e7ar novo dia</button>';
+    }
+
     if (state.aba === "escanear") html += renderCamera();
     else if (state.aba === "separar") html += renderSeparar();
     else if (state.aba === "mapa") html += renderMapa();
@@ -1356,17 +1375,10 @@
     resultado.listaGrupos.forEach(function (g) { todos = todos.concat(g.itens); });
     var total = todos.length;
     var separados = todos.filter(function (it) { return statusDe(it.id).separado; }).length;
-    var entregues = todos.filter(function (it) { return statusDe(it.id).entregue; }).length;
-    var devolvidos = todos.filter(function (it) { return statusDe(it.id).devolvido; }).length;
 
     var html = '<div class="card" style="padding:10px 12px;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center;font-size:14px">' +
       "<span><strong>" + total + "</strong> " + plural(total, "pacote", "pacotes") + " \u00b7 <strong>" + resultado.listaGrupos.length + "</strong> " + plural(resultado.listaGrupos.length, "cor", "cores") + "</span>" +
       '<span style="color:var(--ok);font-weight:600">' + separados + "/" + total + " separados</span></div>";
-    if (entregues > 0 || devolvidos > 0) {
-      html += '<div class="card" style="padding:8px 12px;margin-bottom:12px;font-size:12px;display:flex;gap:14px">' +
-        '<span style="color:var(--ok)">\u2713 ' + entregues + " " + plural(entregues, "entregue", "entregues") + "</span>" +
-        '<span style="color:var(--alert)">\u21A9 ' + devolvidos + " " + plural(devolvidos, "devolvido", "devolvidos") + "</span></div>";
-    }
     return html;
   }
 
@@ -1392,7 +1404,6 @@
 
         if (primeiroDoNumero) {
           var itensDoEndereco = g.itens.filter(function (it) { return it.numero === item.numero; });
-          var entreguesDoNumero = itensDoEndereco.filter(function (it) { return statusDe(it.id).entregue; }).length;
           var semFotoNoEndereco = itensDoEndereco.filter(function (it) {
             var tem = !!(state.entregaInfo[it.id] && state.entregaInfo[it.id].fotoPacoteUrl);
             return !tem && !pacotePendenteFila(it.id);
@@ -1403,8 +1414,8 @@
             if (qv) { quemRecebeuEndereco = qv; break; }
           }
           html += '<li id="endereco-' + chaveEndereco + '" style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
-            '<span style="flex:1"><span style="font-size:13px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
-            (qtdMesmoNumero > 1 ? '<span style="font-size:12px;opacity:.7"> \u00b7 ' + qtdMesmoNumero + " pacotes \u00b7 " + entreguesDoNumero + "/" + qtdMesmoNumero + " entregues</span>" : "") + "</span>" +
+            '<span style="flex:1"><span style="font-size:16px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
+            (qtdMesmoNumero > 1 ? '<span style="font-size:14px;font-weight:700;color:var(--accent-deep)"> \u00b7 ' + qtdMesmoNumero + " pacotes</span>" : "") + "</span>" +
             (qtdMesmoNumero > 1 && semFotoNoEndereco > 0 ? '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill">\u{1F4F7} Todas (' + semFotoNoEndereco + ')</button>' : "") +
             '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFachada ? " ativo-entregue" : (fachadaPendente ? " ativo-pendente" : "")) + '">' +
             (temFachada ? "\u2713" : (fachadaPendente ? "\u23f3" : "\u{1F4F7}")) + " Fachada</button>" +
@@ -1438,8 +1449,6 @@
           '<span' + (st.separado ? ' class="riscado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
           '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
           botaoFoto +
-          '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="entregue" class="pill' + (st.entregue ? " ativo-entregue" : "") + '">Entregue</button>' +
-          '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="devolvido" class="pill' + (st.devolvido ? " ativo-devolvido" : "") + '">Devolvido</button>' +
           "</div></li>";
       });
       html += "</ul></div>";
@@ -1483,7 +1492,6 @@
     }
 
     html += renderListaGrupos(resultado);
-    html += '<button class="btn-primary" data-action="limpar-sessao" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7;margin-top:4px">\u21BB Limpar e come\u00e7ar novo dia</button>';
     return html;
   }
 
