@@ -485,6 +485,37 @@
     }
   }
 
+  // Todos os pacotes de um mesmo prédio/número (mesma rua canônica + mesmo
+  // número), na ordem em que aparecem na lista colada.
+  function linhasDoEndereco(ruaNome, numero) {
+    if (!state.linhasParseadas) return [];
+    return state.linhasParseadas.filter(function (l) {
+      if (l.erro || String(l.numero) !== String(numero)) return false;
+      var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
+      return !!ruaMatch && ruaMatch.nome === ruaNome;
+    });
+  }
+
+  // "Quem recebeu" por endereço: quando um prédio/número tem mais de um
+  // pacote, evita pedir o nome pacote por pacote (na prática quem entrega não
+  // confere nome nenhum, só pega tudo daquele número — geralmente é o
+  // porteiro recebendo o lote inteiro). Um único campo aplica o nome pra
+  // todos os pacotes daquele endereço de uma vez, incluindo os que ainda vão
+  // ganhar foto depois (o nome já fica salvo e entra na foto quando ela for
+  // tirada).
+  function aplicarQuemRecebeuEndereco(ruaNome, numero, valor, gravarFirebase) {
+    var linhas = linhasDoEndereco(ruaNome, numero);
+    var chaveRota = (gravarFirebase && fbDb && state.minhaRota) ? sanitizarChaveFirebase(state.minhaRota) : null;
+    var data = dataDeHoje();
+    linhas.forEach(function (l) {
+      if (!state.entregaInfo[l.id]) state.entregaInfo[l.id] = {};
+      state.entregaInfo[l.id].quemRecebeu = valor;
+      if (chaveRota && l.codigo) {
+        fbDb.ref("lotes/" + chaveRota + "/entregas/" + data + "/" + l.codigo + "/quemRecebeu").set(valor);
+      }
+    });
+  }
+
   var PALETA_CORES = ["#E53935", "#FB8C00", "#FDD835", "#43A047", "#00897B", "#1E88E5", "#3949AB", "#8E24AA", "#D81B60", "#6D4C41"];
 
   function coresPadrao() {
@@ -851,7 +882,9 @@
         var it = entregas[codigo];
         if (!it.chave) return;
         if (!porChave[it.chave]) porChave[it.chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null };
-        porChave[it.chave].pacotes.push({ nome: it.nome || it.quemRecebeu || codigo, url: it.fotoPacoteUrl });
+        // Prioriza quem realmente recebeu (ex: porteiro) sobre o nome do
+        // destinatário da lista colada — é o que sai na foto agora.
+        porChave[it.chave].pacotes.push({ nome: it.quemRecebeu || it.nome || "pacote", codigo: codigo, url: it.fotoPacoteUrl });
       });
       Object.keys(fachadas).forEach(function (chave) {
         var it = fachadas[chave];
@@ -868,16 +901,24 @@
 
       var zip = new JSZip();
       var buscas = [];
+      // Largura do zero à esquerda cresce com o total de endereços do dia, pra
+      // "001_", "002_"... continuar ordenando certinho mesmo se a rota (agora
+      // somando você + ajudante) passar de 99 endereços num dia só.
+      var digitosOrdem = Math.max(2, String(chavesOrdenadas.length).length);
       chavesOrdenadas.forEach(function (chave, idx) {
         var g = porChave[chave];
-        var nomePasta = String(idx + 1).padStart(2, "0") + "_" + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero;
+        var nomePasta = String(idx + 1).padStart(digitosOrdem, "0") + "_" + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero;
         var pasta = zip.folder(nomePasta);
         if (g.fotoFachadaUrl) {
           buscas.push(fetch(g.fotoFachadaUrl).then(function (r) { return r.blob(); }).then(function (b) { pasta.file("fachada.jpg", b); }));
         }
         g.pacotes.forEach(function (p) {
           if (!p.url) return;
-          var nomeArq = sanitizarChaveFirebase(p.nome).replace(/\s+/g, "-") + ".jpg";
+          // Sempre inclui o código junto do nome: como agora vários pacotes do
+          // mesmo endereço podem ficar com o mesmo "quem recebeu" (ex: vários
+          // "Porteiro" na mesma pasta), o código garante que nenhum arquivo
+          // sobrescreva o outro dentro do zip.
+          var nomeArq = sanitizarChaveFirebase(p.nome).replace(/\s+/g, "-") + "_" + p.codigo + ".jpg";
           buscas.push(fetch(p.url).then(function (r) { return r.blob(); }).then(function (b) { pasta.file(nomeArq, b); }));
         });
       });
@@ -1206,12 +1247,19 @@
             var tem = !!(state.entregaInfo[it.id] && state.entregaInfo[it.id].fotoPacoteUrl);
             return !tem && !pacotePendenteFila(it.id);
           }).length;
+          var quemRecebeuEndereco = "";
+          for (var qi = 0; qi < itensDoEndereco.length; qi++) {
+            var qv = (state.entregaInfo[itensDoEndereco[qi].id] && state.entregaInfo[itensDoEndereco[qi].id].quemRecebeu) || "";
+            if (qv) { quemRecebeuEndereco = qv; break; }
+          }
           html += '<li style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
             '<span style="flex:1"><span style="font-size:13px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
             (qtdMesmoNumero > 1 ? '<span style="font-size:12px;opacity:.7"> \u00b7 ' + qtdMesmoNumero + " pacotes \u00b7 " + entreguesDoNumero + "/" + qtdMesmoNumero + " entregues</span>" : "") + "</span>" +
             (qtdMesmoNumero > 1 && semFotoNoEndereco > 0 ? '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill">\u{1F4F7} Todas (' + semFotoNoEndereco + ')</button>' : "") +
             '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFachada ? " ativo-entregue" : (fachadaPendente ? " ativo-pendente" : "")) + '">' +
-            (temFachada ? "\u2713" : (fachadaPendente ? "\u23f3" : "\u{1F4F7}")) + " Fachada</button></li>";
+            (temFachada ? "\u2713" : (fachadaPendente ? "\u23f3" : "\u{1F4F7}")) + " Fachada</button>" +
+            (qtdMesmoNumero > 1 ? '<input data-action="quem-recebeu-endereco" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" value="' + esc(quemRecebeuEndereco) + '" placeholder="Quem recebeu esses ' + qtdMesmoNumero + ' pacotes (ex: porteiro)" style="flex:1 1 100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />' : "") +
+            "</li>";
         }
 
         var quemRecebeuAtual = (state.entregaInfo[item.id] && state.entregaInfo[item.id].quemRecebeu) || "";
@@ -1222,7 +1270,7 @@
           '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
           '<span' + (st.separado ? ' class="riscado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
-          '<input data-action="quem-recebeu" data-id="' + item.id + '" value="' + esc(quemRecebeuAtual) + '" placeholder="Quem recebeu (ex: porteiro)" style="width:100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:6px" />' +
+          (qtdMesmoNumero === 1 ? '<input data-action="quem-recebeu" data-id="' + item.id + '" value="' + esc(quemRecebeuAtual) + '" placeholder="Quem recebeu (ex: porteiro)" style="width:100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:6px" />' : "") +
           '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
           '<button data-action="foto-pacote" data-id="' + item.id + '" class="pill' + (temFotoPacote ? " ativo-entregue" : (fotoPacotePendente ? " ativo-pendente" : "")) + '">' +
           (temFotoPacote ? "\u2713" : (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}")) + " Foto</button>" +
@@ -1408,6 +1456,12 @@
         state.entregaInfo[id].quemRecebeu = el.value;
       };
       el.onblur = function () { salvarQuemRecebeu(id, el.value); };
+    });
+    app.querySelectorAll('[data-action="quem-recebeu-endereco"]').forEach(function (el) {
+      var ruaNome = el.getAttribute("data-rua");
+      var numero = el.getAttribute("data-numero");
+      el.oninput = function () { aplicarQuemRecebeuEndereco(ruaNome, numero, el.value, false); };
+      el.onblur = function () { aplicarQuemRecebeuEndereco(ruaNome, numero, el.value, true); };
     });
     var baixarZipBtn = app.querySelector('[data-action="baixar-zip"]');
     if (baixarZipBtn) baixarZipBtn.onclick = baixarFotosDoDia;
