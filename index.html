@@ -308,6 +308,34 @@
     inputEl.click();
   }
 
+  // Uma vez que o pacote já tem foto confirmada (ícone verde), clicar nele
+  // mostra a foto em vez de abrir a câmera de novo — pra retirar é preciso
+  // apagar primeiro (função separada), só então o ícone volta a abrir a
+  // câmera pra uma foto nova.
+  function verFotoPacote(linhaId) {
+    var info = state.entregaInfo[linhaId];
+    if (!info || !info.fotoPacoteUrl) return;
+    state.fotoVisualizando = { linhaId: linhaId, url: info.fotoPacoteUrl };
+    render();
+  }
+
+  function fecharFotoVisualizando() {
+    state.fotoVisualizando = null;
+    render();
+  }
+
+  function apagarFotoPacote(linhaId) {
+    var linha = state.linhasParseadas && state.linhasParseadas.find(function (l) { return l.id === linhaId; });
+    if (!linha) return;
+    if (!confirm("Apagar essa foto? Depois dá pra tirar uma nova.")) return;
+    if (state.entregaInfo[linhaId]) state.entregaInfo[linhaId].fotoPacoteUrl = "";
+    if (fbDb && state.minhaRota && linha.codigo) {
+      var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+      fbDb.ref("lotes/" + chaveRota + "/entregas/" + dataDeHoje() + "/" + linha.codigo + "/fotoPacoteUrl").remove();
+    }
+    render();
+  }
+
   function capturarFotoFachada(ruaObj, ruaTextoOriginal, numero) {
     if (!cloudinaryPronto || !fbDb || !state.minhaRota) return;
     var nomeRua = ruaObj ? ruaObj.nome : ruaTextoOriginal;
@@ -420,10 +448,20 @@
     });
   }
 
-  function tirarFotoLote() {
+  function tirarFotoLote(tentativas) {
     if (!state.loteFoto || state.loteFoto.statusCamera !== "ativa") return;
     var video = document.getElementById("videoLote");
-    if (!video || !video.videoWidth) return;
+    if (!video || !video.videoWidth) {
+      // Bem no instante em que o botão "Tirar foto" aparece, a câmera às
+      // vezes ainda não entregou o primeiro frame (o navegador já liberou o
+      // acesso, mas o vídeo ainda tá "carregando") — daí o primeiro toque não
+      // fazia nada, e só o segundo (quando o frame já tinha chegado)
+      // funcionava. Em vez de simplesmente ignorar o toque, tenta de novo
+      // sozinho por até meio segundo antes de desistir.
+      tentativas = (typeof tentativas === "number" ? tentativas : 0) + 1;
+      if (tentativas <= 10) setTimeout(function () { tirarFotoLote(tentativas); }, 50);
+      return;
+    }
     var maxLado = 1000;
     var w = video.videoWidth, h = video.videoHeight;
     if (w >= h && w > maxLado) { h = Math.round((h * maxLado) / w); w = maxLado; }
@@ -639,7 +677,8 @@
     resultadoScan: null,
     filaPendente: [],
     enviandoFila: false,
-    loteFoto: null
+    loteFoto: null,
+    fotoVisualizando: null
   };
 
   function carregar(chave, padrao) {
@@ -1110,6 +1149,19 @@
     });
   }
 
+  // Overlay simples por cima da tela atual (não substitui o app.innerHTML
+  // inteiro como o loteFoto) — assim fechar não mexe no scroll da lista por
+  // baixo.
+  function renderVisualizadorFoto() {
+    if (!state.fotoVisualizando) return "";
+    return '<div style="position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:1000;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;gap:14px">' +
+      '<img src="' + state.fotoVisualizando.url + '" style="max-width:100%;max-height:70vh;border-radius:8px;object-fit:contain" />' +
+      '<div style="display:flex;gap:10px">' +
+      '<button data-action="fechar-foto-visualizando" class="pill" style="background:#fff;color:#000">Fechar</button>' +
+      '<button data-action="apagar-foto-visualizando" class="pill" style="background:var(--alert);color:#fff">\u{1F5D1}️ Apagar foto</button>' +
+      "</div></div>";
+  }
+
   // ---------- render ----------
   function setAba(a) {
     if (state.aba !== a) {
@@ -1151,6 +1203,8 @@
     if (state.aba === "escanear") html += renderCamera();
     else if (state.aba === "separar") html += renderSeparar();
     else if (state.aba === "mapa") html += renderMapa();
+
+    html += renderVisualizadorFoto();
 
     app.innerHTML = html;
 
@@ -1247,7 +1301,7 @@
     var reativarBtn = app.querySelector('[data-action="reativar-camera-lote"]');
     if (reativarBtn) reativarBtn.onclick = iniciarCameraLote;
     var tirarBtn = app.querySelector('[data-action="tirar-foto-lote"]');
-    if (tirarBtn) tirarBtn.onclick = tirarFotoLote;
+    if (tirarBtn) tirarBtn.onclick = function () { tirarFotoLote(); };
     var enviarBtn = app.querySelector('[data-action="enviar-lote"]');
     if (enviarBtn) enviarBtn.onclick = enviarLoteFoto;
     app.querySelectorAll('[data-action="remover-foto-lote"]').forEach(function (el) {
@@ -1351,16 +1405,23 @@
         var temFotoPacote = !!(state.entregaInfo[item.id] && state.entregaInfo[item.id].fotoPacoteUrl);
         var fotoPacotePendente = !temFotoPacote && pacotePendenteFila(item.id);
         var recuo = qtdMesmoNumero > 1 ? "8px 12px 8px 26px" : "8px 12px";
-        // Endere\u00e7o com s\u00f3 1 pacote: o bot\u00e3o "Foto" abre a mesma c\u00e2mera ao
-        // vivo do "Todas" (j\u00e1 pede o nome de quem recebeu junto) em vez da
-        // c\u00e2mera nativa \u2014 pedido do usu\u00e1rio, mais r\u00e1pido e mais intuitivo
-        // pra esse caso. Com mais de 1 pacote no n\u00famero, continua a c\u00e2mera
-        // nativa aqui (o "Todas" j\u00e1 cobre o caso do lote).
-        var botaoFoto = qtdMesmoNumero === 1
-          ? '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFotoPacote ? " ativo-entregue" : (fotoPacotePendente ? " ativo-pendente" : "")) + '">' +
-            (temFotoPacote ? "\u2713" : (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}")) + " Foto</button>"
-          : '<button data-action="foto-pacote" data-id="' + item.id + '" class="pill' + (temFotoPacote ? " ativo-entregue" : (fotoPacotePendente ? " ativo-pendente" : "")) + '">' +
-            (temFotoPacote ? "\u2713" : (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}")) + " Foto</button>";
+        // Uma vez com foto confirmada, o \u00edcone vira "ver a foto" em vez de
+        // reabrir a c\u00e2mera \u2014 pra retirar, usa o bot\u00e3o de apagar ao lado (ou
+        // dentro da pr\u00f3pria visualiza\u00e7\u00e3o), e s\u00f3 depois de apagada o \u00edcone
+        // volta a abrir a c\u00e2mera pra uma foto nova. Endere\u00e7o com s\u00f3 1 pacote
+        // usa a c\u00e2mera ao vivo do "Todas" (j\u00e1 pede quem recebeu); com mais de
+        // 1, usa a c\u00e2mera nativa nesse bot\u00e3o individual.
+        var botaoFoto;
+        if (temFotoPacote) {
+          botaoFoto = '<button data-action="ver-foto-pacote" data-id="' + item.id + '" class="pill ativo-entregue">\u2713 Foto</button>' +
+            '<button data-action="apagar-foto-pacote" data-id="' + item.id + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>';
+        } else if (qtdMesmoNumero === 1) {
+          botaoFoto = '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
+            (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}") + " Foto</button>";
+        } else {
+          botaoFoto = '<button data-action="foto-pacote" data-id="' + item.id + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
+            (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}") + " Foto</button>";
+        }
         html += '<li id="pacote-' + item.id + '" style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
           '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
@@ -1536,6 +1597,22 @@
     app.querySelectorAll('[data-action="foto-pacote"]').forEach(function (el) {
       el.onclick = function () { capturarFotoPacote(el.getAttribute("data-id")); };
     });
+    app.querySelectorAll('[data-action="ver-foto-pacote"]').forEach(function (el) {
+      el.onclick = function () { verFotoPacote(el.getAttribute("data-id")); };
+    });
+    app.querySelectorAll('[data-action="apagar-foto-pacote"]').forEach(function (el) {
+      el.onclick = function () { apagarFotoPacote(el.getAttribute("data-id")); };
+    });
+    var fecharFotoVisBtn = app.querySelector('[data-action="fechar-foto-visualizando"]');
+    if (fecharFotoVisBtn) fecharFotoVisBtn.onclick = fecharFotoVisualizando;
+    var apagarFotoVisBtn = app.querySelector('[data-action="apagar-foto-visualizando"]');
+    if (apagarFotoVisBtn) {
+      apagarFotoVisBtn.onclick = function () {
+        var linhaId = state.fotoVisualizando && state.fotoVisualizando.linhaId;
+        fecharFotoVisualizando();
+        if (linhaId) apagarFotoPacote(linhaId);
+      };
+    }
     app.querySelectorAll('[data-action="foto-fachada"]').forEach(function (el) {
       el.onclick = function () { capturarFotoFachada(null, el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
     });
