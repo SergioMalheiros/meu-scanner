@@ -906,14 +906,16 @@
       Object.keys(entregas).forEach(function (codigo) {
         var it = entregas[codigo];
         if (!it.chave) return;
-        if (!porChave[it.chave]) porChave[it.chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null };
+        if (!porChave[it.chave]) porChave[it.chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null, quemRecebeu: "" };
         // Prioriza quem realmente recebeu (ex: porteiro) sobre o nome do
         // destinatário da lista colada — é o que sai na foto agora.
         porChave[it.chave].pacotes.push({ nome: it.quemRecebeu || it.nome || "pacote", codigo: codigo, url: it.fotoPacoteUrl });
+        // Guarda também no nível do endereço, pra ir no nome da pasta do zip.
+        if (!porChave[it.chave].quemRecebeu && it.quemRecebeu) porChave[it.chave].quemRecebeu = it.quemRecebeu;
       });
       Object.keys(fachadas).forEach(function (chave) {
         var it = fachadas[chave];
-        if (!porChave[chave]) porChave[chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null };
+        if (!porChave[chave]) porChave[chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null, quemRecebeu: "" };
         porChave[chave].fotoFachadaUrl = it.fotoFachadaUrl;
       });
 
@@ -932,7 +934,11 @@
       var digitosOrdem = Math.max(2, String(chavesOrdenadas.length).length);
       chavesOrdenadas.forEach(function (chave, idx) {
         var g = porChave[chave];
-        var nomePasta = String(idx + 1).padStart(digitosOrdem, "0") + "_" + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero;
+        // Nome da pasta já sai com rua, número e quem recebeu juntos, pra na
+        // hora de dar baixa no app da J&T não precisar abrir nada — só olhar
+        // o nome da pasta.
+        var nomePasta = String(idx + 1).padStart(digitosOrdem, "0") + "_" + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero +
+          (g.quemRecebeu ? "_" + sanitizarChaveFirebase(g.quemRecebeu).replace(/\s+/g, "-") : "");
         var pasta = zip.folder(nomePasta);
         if (g.fotoFachadaUrl) {
           buscas.push(fetch(g.fotoFachadaUrl).then(function (r) { return r.blob(); }).then(function (b) { pasta.file("fachada.jpg", b); }));
