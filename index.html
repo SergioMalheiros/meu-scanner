@@ -275,20 +275,16 @@
     processarProximo(0);
   }
 
-  function capturarFotoPacote(linhaId, aoCapturar) {
-    if (!cloudinaryPronto || !fbDb || !state.minhaRota || !state.linhasParseadas) { if (aoCapturar) aoCapturar(); return; }
+  function capturarFotoPacote(linhaId) {
+    if (!cloudinaryPronto || !fbDb || !state.minhaRota || !state.linhasParseadas) return;
     var linha = state.linhasParseadas.find(function (l) { return l.id === linhaId; });
-    if (!linha || !linha.codigo) { if (aoCapturar) aoCapturar(); return; }
+    if (!linha || !linha.codigo) return;
     var inputEl = document.createElement("input");
     inputEl.type = "file";
     inputEl.accept = "image/*";
     inputEl.capture = "environment";
     inputEl.onchange = function (ev) {
       var file = ev.target.files && ev.target.files[0];
-      // Dispara o avanço pro próximo da leva ANTES de processar essa foto, pra
-      // câmera do próximo pacote já abrir enquanto essa ainda está comprimindo/
-      // enviando em segundo plano.
-      if (aoCapturar) aoCapturar();
       if (!file) return;
       var chaveRota = sanitizarChaveFirebase(state.minhaRota);
       var data = dataDeHoje();
@@ -339,29 +335,142 @@
     inputEl.click();
   }
 
-  // Tira a foto de todos os pacotes de um mesmo endereço em sequência, sem
-  // precisar voltar pra lista e apertar "Foto" em cada um: assim que a câmera
-  // fecha depois de um clique, já reabre pro próximo pacote pendente daquele
-  // endereço. Se o navegador não deixar reabrir a câmera sozinho (alguns
-  // exigem um toque a cada vez), a leva simplesmente para por aí — dá pra
-  // terminar manualmente os que faltaram, um por um, como antes.
-  function capturarFotosEmLote(ruaNome, numero) {
+  // ---------- modo "várias fotos" por endereço (câmera ao vivo, tipo WhatsApp) ----------
+  // A câmera nativa (usada em capturarFotoPacote/Fachada) tem qualidade melhor,
+  // mas cada foto exige sair e voltar do app de câmera do celular — e em vários
+  // aparelhos isso não reabre sozinho pro próximo pacote. Esse modo aqui abre
+  // uma câmera ao vivo DENTRO do app (mesma técnica da aba de escanear) com um
+  // obturador na tela: tira quantas quiser sem sair da tela, revisa as
+  // miniaturas, e só envia tudo quando aperta "Enviar". Qualidade um pouco
+  // abaixo da câmera nativa, mas bem mais rápido pra prédios com vários
+  // pacotes — troca que o usuário pediu.
+  var streamLote = null;
+
+  function pararCameraLote() {
+    if (streamLote) { streamLote.getTracks().forEach(function (t) { t.stop(); }); streamLote = null; }
+  }
+
+  function abrirLoteFoto(ruaNome, numero) {
     if (!state.linhasParseadas) return;
     // Compara pelo nome CANÔNICO da rua (o mesmo que agrupa a lista na tela),
     // não pelo texto cru colado — assim "R. Mariz e Barros" bate certinho com
     // o grupo "Rua Mariz e Barros" mesmo que o texto original seja abreviado.
-    var lista = state.linhasParseadas.filter(function (l) {
+    var itens = state.linhasParseadas.filter(function (l) {
       if (l.erro || !l.codigo || String(l.numero) !== String(numero)) return false;
       var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
       if (!ruaMatch || ruaMatch.nome !== ruaNome) return false;
       var tem = !!(state.entregaInfo[l.id] && state.entregaInfo[l.id].fotoPacoteUrl);
       return !tem && !pacotePendenteFila(l.id);
     });
-    proximaFotoDoLote(lista, 0);
+    if (!itens.length) return;
+    state.loteFoto = { ruaNome: ruaNome, numero: numero, itens: itens, fotos: [], statusCamera: "pedindo", erro: "" };
+    render();
+    iniciarCameraLote();
   }
-  function proximaFotoDoLote(lista, i) {
-    if (i >= lista.length) return;
-    capturarFotoPacote(lista[i].id, function () { proximaFotoDoLote(lista, i + 1); });
+
+  function iniciarCameraLote() {
+    if (!state.loteFoto) return;
+    state.loteFoto.statusCamera = "pedindo";
+    state.loteFoto.erro = "";
+    render();
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      state.loteFoto.statusCamera = "erro";
+      state.loteFoto.erro = "esse navegador não expõe acesso à câmera aqui.";
+      render();
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
+    }).then(function (stream) {
+      if (!state.loteFoto) { stream.getTracks().forEach(function (t) { t.stop(); }); return; }
+      streamLote = stream;
+      state.loteFoto.statusCamera = "ativa";
+      render();
+      var video = document.getElementById("videoLote");
+      if (video) { video.srcObject = stream; video.play().catch(function () {}); }
+    }).catch(function (e) {
+      if (!state.loteFoto) return;
+      state.loteFoto.statusCamera = "erro";
+      if (e.name === "NotReadableError") {
+        state.loteFoto.erro = "a câmera parece estar em uso por outro app ou aba.";
+      } else if (e.name === "NotFoundError" || e.name === "OverconstrainedError") {
+        state.loteFoto.erro = "não encontrei nenhuma câmera disponível nesse aparelho.";
+      } else {
+        state.loteFoto.erro = "permissão negada ou bloqueada pelo ambiente.";
+      }
+      render();
+    });
+  }
+
+  function tirarFotoLote() {
+    if (!state.loteFoto || state.loteFoto.statusCamera !== "ativa") return;
+    var video = document.getElementById("videoLote");
+    if (!video || !video.videoWidth) return;
+    var maxLado = 1000;
+    var w = video.videoWidth, h = video.videoHeight;
+    if (w >= h && w > maxLado) { h = Math.round((h * maxLado) / w); w = maxLado; }
+    else if (h > w && h > maxLado) { w = Math.round((w * maxLado) / h); h = maxLado; }
+    var canvas = document.createElement("canvas");
+    canvas.width = w; canvas.height = h;
+    canvas.getContext("2d").drawImage(video, 0, 0, w, h);
+    canvas.toBlob(function (blob) {
+      if (!blob || !state.loteFoto) return;
+      state.loteFoto.fotos.push({ blob: blob, previewUrl: URL.createObjectURL(blob) });
+      render();
+    }, "image/jpeg", 0.7);
+  }
+
+  function removerFotoLote(idx) {
+    if (!state.loteFoto) return;
+    var removida = state.loteFoto.fotos.splice(idx, 1)[0];
+    if (removida) URL.revokeObjectURL(removida.previewUrl);
+    render();
+  }
+
+  function cancelarLoteFoto() {
+    if (state.loteFoto && state.loteFoto.fotos.length > 0) {
+      var ok = confirm("Descartar " + state.loteFoto.fotos.length + " " + plural(state.loteFoto.fotos.length, "foto tirada", "fotos tiradas") + "?");
+      if (!ok) return;
+    }
+    pararCameraLote();
+    if (state.loteFoto) state.loteFoto.fotos.forEach(function (f) { URL.revokeObjectURL(f.previewUrl); });
+    state.loteFoto = null;
+    render();
+  }
+
+  function enviarLoteFoto() {
+    if (!state.loteFoto || !state.loteFoto.fotos.length) return;
+    var lote = state.loteFoto;
+    if (lote.fotos.length > lote.itens.length) {
+      var okExtra = confirm(
+        "Você tirou " + lote.fotos.length + " fotos, mas só há " + lote.itens.length + " " +
+        plural(lote.itens.length, "pacote pendente", "pacotes pendentes") + " nesse endereço.\n" +
+        "As últimas " + (lote.fotos.length - lote.itens.length) + " não serão enviadas. Continuar?"
+      );
+      if (!okExtra) return;
+    }
+    pararCameraLote();
+    state.loteFoto = null;
+    render();
+
+    var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+    var data = dataDeHoje();
+    var chave = chaveOrdenavel(lote.ruaNome, lote.numero);
+    var n = Math.min(lote.fotos.length, lote.itens.length);
+    for (var i = 0; i < n; i++) {
+      var linha = lote.itens[i];
+      var item = {
+        tipo: "pacote",
+        pasta: "fotos/" + chaveRota + "/" + data + "/" + chave,
+        nomeArquivo: "pacote_" + linha.codigo + "_" + Date.now() + "_" + i,
+        linhaId: linha.id, chaveRota: chaveRota, data: data, codigo: linha.codigo,
+        rua: linha.rua, numero: linha.numero, nome: linha.nome || "", chave: chave,
+        quemRecebeuSnapshot: (state.entregaInfo[linha.id] && state.entregaInfo[linha.id].quemRecebeu) || ""
+      };
+      processarEnvioFoto(item, lote.fotos[i].blob);
+      URL.revokeObjectURL(lote.fotos[i].previewUrl);
+    }
+    for (var j = n; j < lote.fotos.length; j++) URL.revokeObjectURL(lote.fotos[j].previewUrl);
   }
 
   function salvarQuemRecebeu(linhaId, valor) {
@@ -480,7 +589,8 @@
     erroCamera: "",
     resultadoScan: null,
     filaPendente: [],
-    enviandoFila: false
+    enviandoFila: false,
+    loteFoto: null
   };
 
   function carregar(chave, padrao) {
@@ -836,6 +946,11 @@
       pararCamera();
       render();
     }
+    if (document.hidden && streamLote) {
+      pararCameraLote();
+      if (state.loteFoto) state.loteFoto.statusCamera = "idle";
+      render();
+    }
     if (!document.hidden) tentarReenviarFila();
   });
 
@@ -909,6 +1024,18 @@
 
   function render() {
     var app = document.getElementById("app");
+
+    if (state.loteFoto) {
+      app.innerHTML = renderLoteFoto();
+      attachHandlersLote();
+      var vLote = document.getElementById("videoLote");
+      if (vLote && streamLote && vLote.srcObject !== streamLote) {
+        vLote.srcObject = streamLote;
+        vLote.play().catch(function () {});
+      }
+      return;
+    }
+
     var html = "";
 
     var contadorAtivo = !!state.rotaConectada;
@@ -941,6 +1068,64 @@
 
   function tabBtn(id, label) {
     return '<button class="tab' + (state.aba === id ? " active" : "") + '" data-tab="' + id + '">' + label + "</button>";
+  }
+
+  function renderLoteFoto() {
+    var lote = state.loteFoto;
+    var html = '<div style="padding:24px 0">';
+    html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:8px">' +
+      '<div><p style="font-weight:700;font-size:15px;margin:0">' + esc(lote.ruaNome) + ' · nº ' + esc(lote.numero) + '</p>' +
+      '<p style="font-size:12px;opacity:.65;margin:2px 0 0">' + lote.fotos.length + ' ' + plural(lote.fotos.length, "foto tirada", "fotos tiradas") + ' · ' + lote.itens.length + ' ' + plural(lote.itens.length, "pacote pendente", "pacotes pendentes") + '</p></div>' +
+      '<button data-action="cancelar-lote" style="border:none;background:none;font-size:22px;color:var(--ink);opacity:.6;cursor:pointer;flex-shrink:0">✕</button></div>';
+
+    if (lote.statusCamera === "pedindo") {
+      html += '<p class="muted" style="text-align:center;padding:16px 0">pedindo acesso à câmera...</p>';
+    } else if (lote.statusCamera === "erro") {
+      html += '<div class="warn-box">' + esc(lote.erro) + '</div>' +
+        '<button data-action="reativar-camera-lote" class="btn-primary" style="margin-top:8px">Tentar de novo</button>';
+    } else if (lote.statusCamera === "idle") {
+      html += '<div class="warn-box">câmera pausada (o app ficou em segundo plano).</div>' +
+        '<button data-action="reativar-camera-lote" class="btn-primary" style="margin-top:8px">▶️ Reativar câmera</button>';
+    }
+
+    html += '<video id="videoLote" playsinline autoplay muted style="display:' + (lote.statusCamera === "ativa" ? "block" : "none") + '"></video>';
+
+    if (lote.statusCamera === "ativa") {
+      html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:16px">📸 Tirar foto (' + (lote.fotos.length + 1) + 'ª)</button>';
+    }
+
+    if (lote.fotos.length > 0) {
+      html += '<div style="display:flex;gap:8px;overflow-x:auto;padding:14px 0">';
+      lote.fotos.forEach(function (f, idx) {
+        var pacoteDaFoto = lote.itens[idx];
+        var legenda = pacoteDaFoto ? (pacoteDaFoto.nome || ("nº " + pacoteDaFoto.numero)) : "extra";
+        html += '<div style="position:relative;flex-shrink:0;text-align:center">' +
+          '<img src="' + f.previewUrl + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block" />' +
+          '<button data-action="remover-foto-lote" data-idx="' + idx + '" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:var(--alert);color:#fff;border:none;font-size:12px;line-height:1;cursor:pointer">✕</button>' +
+          '<p style="font-size:9px;opacity:.6;margin:3px 0 0;width:64px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(legenda) + '</p></div>';
+      });
+      html += '</div>';
+    }
+
+    html += '<button data-action="enviar-lote" class="btn-primary" style="margin-top:8px"' + (lote.fotos.length === 0 ? " disabled" : "") + '>' +
+      '✅ Enviar ' + lote.fotos.length + ' ' + plural(lote.fotos.length, "foto", "fotos") + '</button>';
+    html += '</div>';
+    return html;
+  }
+
+  function attachHandlersLote() {
+    var app = document.getElementById("app");
+    var cancelarBtn = app.querySelector('[data-action="cancelar-lote"]');
+    if (cancelarBtn) cancelarBtn.onclick = cancelarLoteFoto;
+    var reativarBtn = app.querySelector('[data-action="reativar-camera-lote"]');
+    if (reativarBtn) reativarBtn.onclick = iniciarCameraLote;
+    var tirarBtn = app.querySelector('[data-action="tirar-foto-lote"]');
+    if (tirarBtn) tirarBtn.onclick = tirarFotoLote;
+    var enviarBtn = app.querySelector('[data-action="enviar-lote"]');
+    if (enviarBtn) enviarBtn.onclick = enviarLoteFoto;
+    app.querySelectorAll('[data-action="remover-foto-lote"]').forEach(function (el) {
+      el.onclick = function () { removerFotoLote(parseInt(el.getAttribute("data-idx"), 10)); };
+    });
   }
 
   function renderCamera() {
@@ -1214,7 +1399,7 @@
       el.onclick = function () { capturarFotoFachada(null, el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
     });
     app.querySelectorAll('[data-action="foto-lote"]').forEach(function (el) {
-      el.onclick = function () { capturarFotosEmLote(el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
+      el.onclick = function () { abrirLoteFoto(el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
     });
     app.querySelectorAll('[data-action="quem-recebeu"]').forEach(function (el) {
       var id = el.getAttribute("data-id");
