@@ -1152,11 +1152,20 @@
 
   function renderLoteFoto() {
     var lote = state.loteFoto;
+    var quemRecebeuLote = "";
+    for (var qi = 0; qi < lote.itens.length; qi++) {
+      var qv = (state.entregaInfo[lote.itens[qi].id] && state.entregaInfo[lote.itens[qi].id].quemRecebeu) || "";
+      if (qv) { quemRecebeuLote = qv; break; }
+    }
     var html = '<div style="padding:24px 0">';
     html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:8px">' +
       '<div><p style="font-weight:700;font-size:15px;margin:0">' + esc(lote.ruaNome) + ' · nº ' + esc(lote.numero) + '</p>' +
       '<p style="font-size:12px;opacity:.65;margin:2px 0 0">' + lote.fotos.length + ' ' + plural(lote.fotos.length, "foto tirada", "fotos tiradas") + ' · ' + lote.itens.length + ' ' + plural(lote.itens.length, "pacote pendente", "pacotes pendentes") + '</p></div>' +
       '<button data-action="cancelar-lote" style="border:none;background:none;font-size:22px;color:var(--ink);opacity:.6;cursor:pointer;flex-shrink:0">✕</button></div>';
+
+    // Nome de quem recebeu esse lote inteiro — não pergunta nome por pacote
+    // (na entrega ninguém confere isso, só pega tudo do número e fotografa).
+    html += '<input id="quemRecebeuLoteInput" value="' + esc(quemRecebeuLote) + '" placeholder="Quem recebeu esse lote? (ex: porteiro)" style="width:100%;font-size:13px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:12px;box-sizing:border-box" />';
 
     if (lote.statusCamera === "pedindo") {
       html += '<p class="muted" style="text-align:center;padding:16px 0">pedindo acesso à câmera...</p>';
@@ -1178,7 +1187,10 @@
       html += '<div style="display:flex;gap:8px;overflow-x:auto;padding:14px 0">';
       lote.fotos.forEach(function (f, idx) {
         var pacoteDaFoto = lote.itens[idx];
-        var legenda = pacoteDaFoto ? (pacoteDaFoto.nome || ("nº " + pacoteDaFoto.numero)) : "extra";
+        // Só a posição (nº do pedido/pacote), nunca o nome de quem é o
+        // destinatário — na entrega isso não é conferido, e ia confundir
+        // (o nome que representa esse lote todo é o do campo acima).
+        var legenda = pacoteDaFoto ? ((idx + 1) + "ª · cód. " + pacoteDaFoto.codigo.slice(-6)) : "extra";
         html += '<div style="position:relative;flex-shrink:0;text-align:center">' +
           '<img src="' + f.previewUrl + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block" />' +
           '<button data-action="remover-foto-lote" data-idx="' + idx + '" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:var(--alert);color:#fff;border:none;font-size:12px;line-height:1;cursor:pointer">✕</button>' +
@@ -1195,6 +1207,12 @@
 
   function attachHandlersLote() {
     var app = document.getElementById("app");
+    var quemRecebeuLoteInput = document.getElementById("quemRecebeuLoteInput");
+    if (quemRecebeuLoteInput && state.loteFoto) {
+      var loteRuaNome = state.loteFoto.ruaNome, loteNumero = state.loteFoto.numero;
+      quemRecebeuLoteInput.oninput = function () { aplicarQuemRecebeuEndereco(loteRuaNome, loteNumero, quemRecebeuLoteInput.value, false); };
+      quemRecebeuLoteInput.onblur = function () { aplicarQuemRecebeuEndereco(loteRuaNome, loteNumero, quemRecebeuLoteInput.value, true); };
+    }
     var cancelarBtn = app.querySelector('[data-action="cancelar-lote"]');
     if (cancelarBtn) cancelarBtn.onclick = cancelarLoteFoto;
     var reativarBtn = app.querySelector('[data-action="reativar-camera-lote"]');
