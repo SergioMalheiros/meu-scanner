@@ -357,12 +357,21 @@
     // Compara pelo nome CANÔNICO da rua (o mesmo que agrupa a lista na tela),
     // não pelo texto cru colado — assim "R. Mariz e Barros" bate certinho com
     // o grupo "Rua Mariz e Barros" mesmo que o texto original seja abreviado.
-    var itens = state.linhasParseadas.filter(function (l) {
+    var itensDoNumero = state.linhasParseadas.filter(function (l) {
       if (l.erro || !l.codigo || String(l.numero) !== String(numero)) return false;
       var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
-      if (!ruaMatch || ruaMatch.nome !== ruaNome) return false;
+      return !!ruaMatch && ruaMatch.nome === ruaNome;
+    });
+    var itens = itensDoNumero.filter(function (l) {
+      if (pacotePendenteFila(l.id)) return false;
+      // Endereço com só 1 pacote: o botão "Foto" da lista usa essa mesma
+      // câmera, então precisa poder reabrir mesmo se já tiver foto (retirar
+      // uma foto ruim, por exemplo). Com mais de 1 pacote, mantém como era:
+      // só entra aqui quem ainda não tem foto (senão o "Todas" ia obrigar a
+      // refazer todo mundo de novo).
+      if (itensDoNumero.length === 1) return true;
       var tem = !!(state.entregaInfo[l.id] && state.entregaInfo[l.id].fotoPacoteUrl);
-      return !tem && !pacotePendenteFila(l.id);
+      return !tem;
     });
     if (!itens.length) return;
     definirFoco("endereco-" + chaveOrdenavel(ruaNome, numero));
@@ -927,11 +936,17 @@
       }
 
       var zip = new JSZip();
-      var buscas = [];
       // Largura do zero à esquerda cresce com o total de endereços do dia, pra
       // "001_", "002_"... continuar ordenando certinho mesmo se a rota (agora
       // somando você + ajudante) passar de 99 endereços num dia só.
       var digitosOrdem = Math.max(2, String(chavesOrdenadas.length).length);
+      // Monta a lista de tudo que precisa baixar, já na ordem certa — mas
+      // ainda sem tocar no zip. Se cada foto entrasse no zip assim que
+      // terminasse de baixar (como era antes), quem tivesse conexão mais
+      // rápida furava a fila e a ordem das pastas saía embaralhada (foi
+      // exatamente isso: a pasta 04 baixou mais rápido que a 02 e entrou
+      // antes dela no arquivo).
+      var itensParaBuscar = [];
       chavesOrdenadas.forEach(function (chave, idx) {
         var g = porChave[chave];
         // Nome da pasta já sai com rua, número e quem recebeu juntos, pra na
@@ -939,9 +954,8 @@
         // o nome da pasta.
         var nomePasta = String(idx + 1).padStart(digitosOrdem, "0") + "_" + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero +
           (g.quemRecebeu ? "_" + sanitizarChaveFirebase(g.quemRecebeu).replace(/\s+/g, "-") : "");
-        var pasta = zip.folder(nomePasta);
         if (g.fotoFachadaUrl) {
-          buscas.push(fetch(g.fotoFachadaUrl).then(function (r) { return r.blob(); }).then(function (b) { pasta.file("fachada.jpg", b); }));
+          itensParaBuscar.push({ nomePasta: nomePasta, nomeArquivo: "fachada.jpg", url: g.fotoFachadaUrl });
         }
         g.pacotes.forEach(function (p) {
           if (!p.url) return;
@@ -950,11 +964,20 @@
           // "Porteiro" na mesma pasta), o código garante que nenhum arquivo
           // sobrescreva o outro dentro do zip.
           var nomeArq = sanitizarChaveFirebase(p.nome).replace(/\s+/g, "-") + "_" + p.codigo + ".jpg";
-          buscas.push(fetch(p.url).then(function (r) { return r.blob(); }).then(function (b) { pasta.file(nomeArq, b); }));
+          itensParaBuscar.push({ nomePasta: nomePasta, nomeArquivo: nomeArq, url: p.url });
         });
       });
 
-      Promise.all(buscas).then(function () {
+      // Baixa tudo em paralelo (rápido), mas só encaixa no zip DEPOIS que
+      // tudo já chegou — um de cada vez, na ordem exata da lista acima. Isso
+      // é o que garante a ordem certa dentro do zip, não importa qual foto
+      // demorou mais ou menos pra baixar.
+      Promise.all(itensParaBuscar.map(function (it) {
+        return fetch(it.url).then(function (r) { return r.blob(); }).catch(function () { return null; });
+      })).then(function (blobs) {
+        itensParaBuscar.forEach(function (it, i) {
+          if (blobs[i]) zip.folder(it.nomePasta).file(it.nomeArquivo, blobs[i]);
+        });
         return zip.generateAsync({ type: "blob" });
       }).then(function (blob) {
         var url = URL.createObjectURL(blob);
@@ -1321,22 +1344,29 @@
             (qtdMesmoNumero > 1 && semFotoNoEndereco > 0 ? '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill">\u{1F4F7} Todas (' + semFotoNoEndereco + ')</button>' : "") +
             '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFachada ? " ativo-entregue" : (fachadaPendente ? " ativo-pendente" : "")) + '">' +
             (temFachada ? "\u2713" : (fachadaPendente ? "\u23f3" : "\u{1F4F7}")) + " Fachada</button>" +
-            (qtdMesmoNumero > 1 ? '<input data-action="quem-recebeu-endereco" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" value="' + esc(quemRecebeuEndereco) + '" placeholder="Quem recebeu esses ' + qtdMesmoNumero + ' pacotes (ex: porteiro)" style="flex:1 1 100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />' : "") +
+            '<input data-action="quem-recebeu-endereco" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" value="' + esc(quemRecebeuEndereco) + '" placeholder="Quem recebeu ' + (qtdMesmoNumero === 1 ? "esse pacote" : "esses " + qtdMesmoNumero + " pacotes") + ' (ex: porteiro)" style="flex:1 1 100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />' +
             "</li>";
         }
 
-        var quemRecebeuAtual = (state.entregaInfo[item.id] && state.entregaInfo[item.id].quemRecebeu) || "";
         var temFotoPacote = !!(state.entregaInfo[item.id] && state.entregaInfo[item.id].fotoPacoteUrl);
         var fotoPacotePendente = !temFotoPacote && pacotePendenteFila(item.id);
         var recuo = qtdMesmoNumero > 1 ? "8px 12px 8px 26px" : "8px 12px";
+        // Endere\u00e7o com s\u00f3 1 pacote: o bot\u00e3o "Foto" abre a mesma c\u00e2mera ao
+        // vivo do "Todas" (j\u00e1 pede o nome de quem recebeu junto) em vez da
+        // c\u00e2mera nativa \u2014 pedido do usu\u00e1rio, mais r\u00e1pido e mais intuitivo
+        // pra esse caso. Com mais de 1 pacote no n\u00famero, continua a c\u00e2mera
+        // nativa aqui (o "Todas" j\u00e1 cobre o caso do lote).
+        var botaoFoto = qtdMesmoNumero === 1
+          ? '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFotoPacote ? " ativo-entregue" : (fotoPacotePendente ? " ativo-pendente" : "")) + '">' +
+            (temFotoPacote ? "\u2713" : (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}")) + " Foto</button>"
+          : '<button data-action="foto-pacote" data-id="' + item.id + '" class="pill' + (temFotoPacote ? " ativo-entregue" : (fotoPacotePendente ? " ativo-pendente" : "")) + '">' +
+            (temFotoPacote ? "\u2713" : (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}")) + " Foto</button>";
         html += '<li id="pacote-' + item.id + '" style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
           '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
           '<span' + (st.separado ? ' class="riscado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
-          (qtdMesmoNumero === 1 ? '<input data-action="quem-recebeu" data-id="' + item.id + '" value="' + esc(quemRecebeuAtual) + '" placeholder="Quem recebeu (ex: porteiro)" style="width:100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:6px" />' : "") +
           '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
-          '<button data-action="foto-pacote" data-id="' + item.id + '" class="pill' + (temFotoPacote ? " ativo-entregue" : (fotoPacotePendente ? " ativo-pendente" : "")) + '">' +
-          (temFotoPacote ? "\u2713" : (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}")) + " Foto</button>" +
+          botaoFoto +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="entregue" class="pill' + (st.entregue ? " ativo-entregue" : "") + '">Entregue</button>' +
           '<button data-action="marcar-entrega" data-id="' + item.id + '" data-campo="devolvido" class="pill' + (st.devolvido ? " ativo-devolvido" : "") + '">Devolvido</button>' +
           "</div></li>";
