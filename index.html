@@ -1112,7 +1112,9 @@
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       state.statusCamera = "erro"; state.erroCamera = "esse navegador não expõe acesso à câmera aqui."; render(); return;
     }
-    navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } }).then(function (stream) {
+    navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } }
+    }).then(function (stream) {
       streamAtual = stream;
       state.statusCamera = ("BarcodeDetector" in window) ? "ativa" : "sem-suporte";
       render();
