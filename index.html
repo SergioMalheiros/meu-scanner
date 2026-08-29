@@ -658,7 +658,8 @@
     filaPendente: [],
     enviandoFila: false,
     loteFoto: null,
-    fotoVisualizando: null
+    fotoVisualizando: null,
+    bipeAtivo: true
   };
 
   function carregar(chave, padrao) {
@@ -696,6 +697,7 @@
   state.contadorGlobal = carregar("contador-pacotes-total", 0);
   state.minhaRota = carregar("minha-rota", "");
   state.filaPendente = carregar("fila-fotos-pendentes", []);
+  state.bipeAtivo = carregar("bipe-ativo", true);
   focoAncora = carregar("foco-ancora", null);
   var sess = carregar("sessao-atual", null);
   if (sess) {
@@ -1089,6 +1091,40 @@
     tentarReenviarFila();
   });
 
+  // Bipe curto e discreto ao separar com sucesso (mesma ideia dos leitores de
+  // código de barras do galpão) — sintetizado na hora (sem precisar de
+  // arquivo de áudio), então funciona offline igual ao resto do app. Fica em
+  // silêncio nos casos de erro (código não encontrado / sem lista), a pedido
+  // do usuário. Um dos dois pode desligar sozinho no aparelho dele, sem
+  // afetar o outro (fica salvo só localmente, não é uma config da rota).
+  var audioCtxBipe = null;
+  function tocarBipeSucesso() {
+    if (!state.bipeAtivo) return;
+    try {
+      if (!audioCtxBipe) audioCtxBipe = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtxBipe.state === "suspended") audioCtxBipe.resume();
+      var agora = audioCtxBipe.currentTime;
+      var osc = audioCtxBipe.createOscillator();
+      var gain = audioCtxBipe.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 1046.5;
+      gain.gain.setValueAtTime(0.0001, agora);
+      gain.gain.exponentialRampToValueAtTime(0.12, agora + 0.008);
+      gain.gain.exponentialRampToValueAtTime(0.0001, agora + 0.11);
+      osc.connect(gain);
+      gain.connect(audioCtxBipe.destination);
+      osc.start(agora);
+      osc.stop(agora + 0.12);
+    } catch (e) {
+      // Sem suporte a áudio ou bloqueado pelo navegador — só não bipa.
+    }
+  }
+  function alternarBipe() {
+    state.bipeAtivo = !state.bipeAtivo;
+    salvar("bipe-ativo", state.bipeAtivo);
+    render();
+  }
+
   function processarCodigoLido(codigo) {
     var agora = Date.now();
     if (ultimoCodigo.codigo === codigo && agora - ultimoCodigo.ts < 2500) return;
@@ -1101,6 +1137,7 @@
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
     var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch, calcularSplitsPorRua()) : null;
     state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, classificacao: classificacao };
+    tocarBipeSucesso();
     marcarSeparado(linha.id, true);
   }
 
@@ -1326,7 +1363,9 @@
     if (!state.linhasParseadas) {
       return '<div class="warn-box">Carregue a lista do dia na aba "Hoje" primeiro \u2014 \u00e9 dela que vem o n\u00famero de cada pacote.</div>';
     }
-    var html = "";
+    var html = '<div style="display:flex;justify-content:flex-end;margin-bottom:8px">' +
+      '<button data-action="alternar-bipe" class="pill' + (state.bipeAtivo ? " ativo-entregue" : "") + '">' +
+      (state.bipeAtivo ? "\ud83d\udd0a Bipe ligado" : "\ud83d\udd07 Bipe desligado") + '</button></div>';
     if (state.statusCamera === "idle") {
       html += '<button class="btn-primary" data-action="iniciar-camera">\u{1F4F7} iniciar c\u00e2mera</button>';
     } else if (state.statusCamera === "pedindo") {
@@ -1574,6 +1613,8 @@
 
     var iniciarBtn = app.querySelector('[data-action="iniciar-camera"]');
     if (iniciarBtn) iniciarBtn.onclick = iniciarCamera;
+    var alternarBipeBtn = app.querySelector('[data-action="alternar-bipe"]');
+    if (alternarBipeBtn) alternarBipeBtn.onclick = alternarBipe;
 
     var textoEl = document.getElementById("textoColado");
     if (textoEl) textoEl.oninput = function () { state.textoColado = textoEl.value; var btn = app.querySelector('[data-action="organizar"]'); if (btn) btn.disabled = !state.textoColado.trim(); };
