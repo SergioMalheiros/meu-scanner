@@ -655,6 +655,7 @@
     statusCamera: "idle",
     erroCamera: "",
     resultadoScan: null,
+    flashScan: null,
     filaPendente: [],
     enviandoFila: false,
     loteFoto: null,
@@ -1125,6 +1126,23 @@
     render();
   }
 
+  // Flash de tela cheia com a cor da faixa, por cima da câmera, logo após um
+  // bipe de sucesso — pensado pra jogar o pacote direto num saco/compartimento
+  // já rotulado com essa mesma cor, sem precisar ler nada, em vez de ensacar
+  // tudo junto e separar de novo na rua. Some sozinho rápido pra não atrapalhar
+  // o próximo escaneamento; cada novo escaneamento reinicia a contagem, então
+  // nunca some "cedo demais" por causa de um flash anterior ainda correndo.
+  var flashTimeoutId = null;
+  function agendarFlashScan(classificacao, rua, numero) {
+    if (flashTimeoutId) clearTimeout(flashTimeoutId);
+    state.flashScan = { cor: classificacao.cor, label: classificacao.label, rua: rua, numero: numero };
+    flashTimeoutId = setTimeout(function () {
+      flashTimeoutId = null;
+      state.flashScan = null;
+      render();
+    }, 800);
+  }
+
   function processarCodigoLido(codigo) {
     var agora = Date.now();
     if (ultimoCodigo.codigo === codigo && agora - ultimoCodigo.ts < 2500) return;
@@ -1138,6 +1156,7 @@
     var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch, calcularSplitsPorRua()) : null;
     state.resultadoScan = { encontrado: true, rua: linha.rua, numero: linha.numero, nome: linha.nome, classificacao: classificacao };
     tocarBipeSucesso();
+    if (classificacao) agendarFlashScan(classificacao, linha.rua, linha.numero);
     marcarSeparado(linha.id, true);
   }
 
@@ -1203,6 +1222,8 @@
     if (state.aba !== a) {
       if (streamAtual) pararCamera();
       state.resultadoScan = null;
+      state.flashScan = null;
+      if (flashTimeoutId) { clearTimeout(flashTimeoutId); flashTimeoutId = null; }
     }
     state.aba = a;
     render();
@@ -1359,6 +1380,16 @@
     });
   }
 
+  function renderFlashScan() {
+    if (!state.flashScan) return "";
+    var f = state.flashScan;
+    var corTexto = corTextoParaHex(f.cor);
+    return '<div style="position:fixed;inset:0;background:' + f.cor + ';z-index:1200;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;pointer-events:none">' +
+      '<p style="font-size:60px;font-weight:800;margin:0;color:' + corTexto + '">' + f.label + '</p>' +
+      '<p style="font-size:20px;font-weight:600;margin:0;color:' + corTexto + ';opacity:.9">' + esc(f.rua) + ' · nº ' + esc(f.numero) + '</p>' +
+      "</div>";
+  }
+
   function renderCamera() {
     if (!state.linhasParseadas) {
       return '<div class="warn-box">Carregue a lista do dia na aba "Hoje" primeiro \u2014 \u00e9 dela que vem o n\u00famero de cada pacote.</div>';
@@ -1390,6 +1421,7 @@
         html += '<div class="result-warn" style="margin-top:12px">' + (r.semLista ? "carregue a lista do dia primeiro." : 'c\u00f3digo "' + esc(r.codigo) + '" n\u00e3o encontrado na lista de hoje.') + "</div>";
       }
     }
+    html += renderFlashScan();
     return html;
   }
 
