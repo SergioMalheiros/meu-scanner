@@ -42,7 +42,7 @@
   .result-warn { border-radius: 14px; padding: 16px; text-align: center; font-size: 14px; background: var(--alert-light); color: var(--alert); }
   .checkbox { width: 18px; height: 18px; border-radius: 5px; border: 1.5px solid var(--line); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
   .checkbox.done { background: var(--ok); border-color: var(--ok); }
-  .riscado { text-decoration: line-through; opacity: .45; }
+  .nome-separado { color: var(--ok); text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 3px; }
   video { width: 100%; min-height: 240px; object-fit: cover; border-radius: 10px; background: #000; margin-top: 12px; }
   .warn-box { border-radius: 10px; padding: 12px; font-size: 13px; background: var(--alert-light); color: var(--alert); }
   .colorpick-row { display: flex; align-items: center; justify-content: space-between; padding: 7px 0; font-size: 13px; }
@@ -152,7 +152,7 @@
     return new Blob([bytes], { type: mime });
   }
 
-  // Sufixo único no nome (ver chamadas em capturarFotoPacote/Fachada): o preset
+  // Sufixo único no nome (ver os "nomeArquivo" montados na hora de enviar): o preset
   // do Cloudinary está com "Overwrite: false", então reenviar pro mesmo
   // public_id (ex: tirar a foto de novo do mesmo pacote) NÃO substituiria a
   // imagem antiga — o Cloudinary só devolveria a antiga de novo, calado, como
@@ -278,39 +278,6 @@
     processarProximo(0);
   }
 
-  function capturarFotoPacote(linhaId) {
-    if (!cloudinaryPronto || !fbDb || !state.minhaRota || !state.linhasParseadas) return;
-    var linha = state.linhasParseadas.find(function (l) { return l.id === linhaId; });
-    if (!linha || !linha.codigo) return;
-    definirFoco("pacote-" + linhaId);
-    var inputEl = document.createElement("input");
-    inputEl.type = "file";
-    inputEl.accept = "image/*";
-    inputEl.capture = "environment";
-    inputEl.onchange = function (ev) {
-      var file = ev.target.files && ev.target.files[0];
-      if (!file) return;
-      var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-      var data = dataDeHoje();
-      var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
-      var chave = chaveOrdenavel(ruaMatch ? ruaMatch.nome : linha.rua, linha.numero);
-      comprimirImagem(file, 1000, 0.7).then(function (blob) {
-        var item = {
-          tipo: "pacote",
-          pasta: "fotos/" + chaveRota + "/" + data + "/" + chave,
-          nomeArquivo: "pacote_" + linha.codigo + "_" + Date.now(),
-          linhaId: linhaId, chaveRota: chaveRota, data: data, codigo: linha.codigo,
-          rua: linha.rua, numero: linha.numero, nome: linha.nome || "", chave: chave,
-          quemRecebeuSnapshot: (state.entregaInfo[linhaId] && state.entregaInfo[linhaId].quemRecebeu) || ""
-        };
-        processarEnvioFoto(item, blob);
-      }).catch(function () {
-        alert("Não consegui preparar a foto (erro ao comprimir a imagem). Tire de novo, se der.");
-      });
-    };
-    inputEl.click();
-  }
-
   // Uma vez que o pacote já tem foto confirmada (ícone verde), clicar nele
   // mostra a foto em vez de abrir a câmera de novo — pra retirar é preciso
   // apagar primeiro (função separada), só então o ícone volta a abrir a
@@ -339,49 +306,36 @@
     render();
   }
 
-  function capturarFotoFachada(ruaObj, ruaTextoOriginal, numero) {
+  function abrirFachadaFoto(ruaNome, numero) {
     if (!cloudinaryPronto || !fbDb || !state.minhaRota) return;
-    var nomeRua = ruaObj ? ruaObj.nome : ruaTextoOriginal;
-    var chave = chaveOrdenavel(nomeRua, numero);
+    var chave = chaveOrdenavel(ruaNome, numero);
     // Fachada agora é permanente (vale pra rota inteira, em qualquer dia) —
     // se já tem uma registrada, confirma antes de substituir pra evitar
     // apagar sem querer uma foto boa com um toque sem querer no botão.
     if (state.fachadaInfo[chave] && !confirm("Essa fachada já está registrada (vale pra toda a rota, em qualquer dia). Quer tirar outra foto e substituir?")) {
       return;
     }
+    // Mesma câmera ao vivo do "Todas"/"Foto" (sem input nativo) — só que sem
+    // itens de pacote e sem pedir quem recebeu, já que fachada é só a foto
+    // do prédio.
     definirFoco("endereco-" + chave);
-    var inputEl = document.createElement("input");
-    inputEl.type = "file";
-    inputEl.accept = "image/*";
-    inputEl.capture = "environment";
-    inputEl.onchange = function (ev) {
-      var file = ev.target.files && ev.target.files[0];
-      if (!file) return;
-      var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-      comprimirImagem(file, 1000, 0.7).then(function (blob) {
-        var item = {
-          tipo: "fachada",
-          pasta: "fotos/" + chaveRota + "/fachadas/" + chave,
-          nomeArquivo: "fachada_" + Date.now(),
-          chaveRota: chaveRota, chave: chave, rua: nomeRua, numero: numero
-        };
-        processarEnvioFoto(item, blob);
-      }).catch(function () {
-        alert("Não consegui preparar a foto (erro ao comprimir a imagem). Tire de novo, se der.");
-      });
-    };
-    inputEl.click();
+    state.loteFoto = { tipo: "fachada", ruaNome: ruaNome, numero: numero, itens: [], fotos: [], statusCamera: "pedindo", erro: "" };
+    render();
+    iniciarCameraLote();
   }
 
-  // ---------- modo "várias fotos" por endereço (câmera ao vivo, tipo WhatsApp) ----------
-  // A câmera nativa (usada em capturarFotoPacote/Fachada) tem qualidade melhor,
-  // mas cada foto exige sair e voltar do app de câmera do celular — e em vários
-  // aparelhos isso não reabre sozinho pro próximo pacote. Esse modo aqui abre
-  // uma câmera ao vivo DENTRO do app (mesma técnica da aba de escanear) com um
-  // obturador na tela: tira quantas quiser sem sair da tela, revisa as
-  // miniaturas, e só envia tudo quando aperta "Enviar". Qualidade um pouco
-  // abaixo da câmera nativa, mas bem mais rápido pra prédios com vários
-  // pacotes — troca que o usuário pediu.
+  // ---------- câmera ao vivo por endereço (pacotes e fachada) ----------
+  // Única forma de tirar foto no app — pacote(s) e fachada. Antes existia
+  // também uma câmera nativa (sair pro app de câmera do celular e voltar),
+  // com qualidade um pouco melhor, mas cada foto exigia sair e voltar do app
+  // — e em vários aparelhos isso não reabria sozinho pro próximo pacote.
+  // Essa aqui abre uma câmera ao vivo DENTRO do app (mesma técnica da aba de
+  // escanear) com um obturador na tela: tira quantas quiser sem sair da
+  // tela, revisa as miniaturas, e só envia quando aperta "Enviar" — bem mais
+  // rápido e prático, principalmente pra prédios com vários pacotes. O
+  // mesmo state.loteFoto serve tanto pra pacote(s) (tipo "pacotes", pede
+  // quem recebeu) quanto pra fachada (tipo "fachada", 1 foto só, sem quem
+  // recebeu).
   var streamLote = null;
 
   function pararCameraLote() {
@@ -400,18 +354,18 @@
     });
     var itens = itensDoNumero.filter(function (l) {
       if (pacotePendenteFila(l.id)) return false;
-      // Endereço com só 1 pacote: o botão "Foto" da lista usa essa mesma
-      // câmera, então precisa poder reabrir mesmo se já tiver foto (retirar
-      // uma foto ruim, por exemplo). Com mais de 1 pacote, mantém como era:
-      // só entra aqui quem ainda não tem foto (senão o "Todas" ia obrigar a
-      // refazer todo mundo de novo).
+      // Endereço com só 1 pacote: precisa poder reabrir mesmo se já tiver
+      // foto (retirar uma foto ruim, por exemplo). Com mais de 1 pacote,
+      // qualquer botão "Foto" clicado abre o mesmo lote de quem ainda não
+      // tem foto — igual ao "Todas" — só entra aqui quem ainda não tem foto
+      // (senão ia obrigar a refazer todo mundo de novo).
       if (itensDoNumero.length === 1) return true;
       var tem = !!(state.entregaInfo[l.id] && state.entregaInfo[l.id].fotoPacoteUrl);
       return !tem;
     });
     if (!itens.length) return;
     definirFoco("endereco-" + chaveOrdenavel(ruaNome, numero));
-    state.loteFoto = { ruaNome: ruaNome, numero: numero, itens: itens, fotos: [], statusCamera: "pedindo", erro: "" };
+    state.loteFoto = { tipo: "pacotes", ruaNome: ruaNome, numero: numero, itens: itens, fotos: [], statusCamera: "pedindo", erro: "" };
     render();
     iniciarCameraLote();
   }
@@ -505,6 +459,24 @@
   function enviarLoteFoto() {
     if (!state.loteFoto || !state.loteFoto.fotos.length) return;
     var lote = state.loteFoto;
+
+    if (lote.tipo === "fachada") {
+      pararCameraLote();
+      state.loteFoto = null;
+      render();
+      var chaveRotaFachada = sanitizarChaveFirebase(state.minhaRota);
+      var chaveFachada = chaveOrdenavel(lote.ruaNome, lote.numero);
+      var itemFachada = {
+        tipo: "fachada",
+        pasta: "fotos/" + chaveRotaFachada + "/fachadas/" + chaveFachada,
+        nomeArquivo: "fachada_" + Date.now(),
+        chaveRota: chaveRotaFachada, chave: chaveFachada, rua: lote.ruaNome, numero: lote.numero
+      };
+      processarEnvioFoto(itemFachada, lote.fotos[0].blob);
+      lote.fotos.forEach(function (f) { URL.revokeObjectURL(f.previewUrl); });
+      return;
+    }
+
     if (lote.fotos.length > lote.itens.length) {
       var okExtra = confirm(
         "Você tirou " + lote.fotos.length + " fotos, mas só há " + lote.itens.length + " " +
@@ -1264,20 +1236,27 @@
 
   function renderLoteFoto() {
     var lote = state.loteFoto;
+    var ehFachada = lote.tipo === "fachada";
     var quemRecebeuLote = "";
     for (var qi = 0; qi < lote.itens.length; qi++) {
       var qv = (state.entregaInfo[lote.itens[qi].id] && state.entregaInfo[lote.itens[qi].id].quemRecebeu) || "";
       if (qv) { quemRecebeuLote = qv; break; }
     }
+    var infoLinha = ehFachada
+      ? (lote.fotos.length > 0 ? "foto pronta pra enviar" : "tire 1 foto da fachada do prédio")
+      : (lote.fotos.length + ' ' + plural(lote.fotos.length, "foto tirada", "fotos tiradas") + ' · ' + lote.itens.length + ' ' + plural(lote.itens.length, "pacote pendente", "pacotes pendentes"));
     var html = '<div style="padding:24px 0">';
     html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:8px">' +
-      '<div><p style="font-weight:700;font-size:15px;margin:0">' + esc(lote.ruaNome) + ' · nº ' + esc(lote.numero) + '</p>' +
-      '<p style="font-size:12px;opacity:.65;margin:2px 0 0">' + lote.fotos.length + ' ' + plural(lote.fotos.length, "foto tirada", "fotos tiradas") + ' · ' + lote.itens.length + ' ' + plural(lote.itens.length, "pacote pendente", "pacotes pendentes") + '</p></div>' +
+      '<div><p style="font-weight:700;font-size:15px;margin:0">' + esc(lote.ruaNome) + ' · nº ' + esc(lote.numero) + (ehFachada ? " · fachada" : "") + '</p>' +
+      '<p style="font-size:12px;opacity:.65;margin:2px 0 0">' + infoLinha + '</p></div>' +
       '<button data-action="cancelar-lote" style="border:none;background:none;font-size:22px;color:var(--ink);opacity:.6;cursor:pointer;flex-shrink:0">✕</button></div>';
 
-    // Nome de quem recebeu esse lote inteiro — não pergunta nome por pacote
-    // (na entrega ninguém confere isso, só pega tudo do número e fotografa).
-    html += '<input id="quemRecebeuLoteInput" value="' + esc(quemRecebeuLote) + '" placeholder="Quem recebeu esse lote? (ex: porteiro)" style="width:100%;font-size:13px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:12px;box-sizing:border-box" />';
+    if (!ehFachada) {
+      // Nome de quem recebeu esse lote inteiro — não pergunta nome por pacote
+      // (na entrega ninguém confere isso, só pega tudo do número e fotografa).
+      // Fachada não pergunta isso — é só a foto do prédio.
+      html += '<input id="quemRecebeuLoteInput" value="' + esc(quemRecebeuLote) + '" placeholder="Quem recebeu esse lote? (ex: porteiro)" style="width:100%;font-size:13px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:12px;box-sizing:border-box" />';
+    }
 
     if (lote.statusCamera === "pedindo") {
       html += '<p class="muted" style="text-align:center;padding:16px 0">pedindo acesso à câmera...</p>';
@@ -1291,8 +1270,11 @@
 
     html += '<video id="videoLote" playsinline autoplay muted style="display:' + (lote.statusCamera === "ativa" ? "block" : "none") + '"></video>';
 
-    if (lote.statusCamera === "ativa") {
-      html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:16px">📸 Tirar foto (' + (lote.fotos.length + 1) + 'ª)</button>';
+    if (lote.statusCamera === "ativa" && (!ehFachada || lote.fotos.length === 0)) {
+      // Fachada é só 1 foto — depois de tirada, o obturador some (pra ver de
+      // novo é só apagar a miniatura, que ele volta).
+      html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:16px">📸 ' +
+        (ehFachada ? "Tirar foto da fachada" : "Tirar foto (" + (lote.fotos.length + 1) + "ª)") + '</button>';
     }
 
     if (lote.fotos.length > 0) {
@@ -1302,7 +1284,7 @@
         // Só a posição (nº do pedido/pacote), nunca o nome de quem é o
         // destinatário — na entrega isso não é conferido, e ia confundir
         // (o nome que representa esse lote todo é o do campo acima).
-        var legenda = pacoteDaFoto ? ((idx + 1) + "ª · cód. " + pacoteDaFoto.codigo.slice(-6)) : "extra";
+        var legenda = ehFachada ? "fachada" : (pacoteDaFoto ? ((idx + 1) + "ª · cód. " + pacoteDaFoto.codigo.slice(-6)) : "extra");
         html += '<div style="position:relative;flex-shrink:0;text-align:center">' +
           '<img src="' + f.previewUrl + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block" />' +
           '<button data-action="remover-foto-lote" data-idx="' + idx + '" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:var(--alert);color:#fff;border:none;font-size:12px;line-height:1;cursor:pointer">✕</button>' +
@@ -1312,7 +1294,7 @@
     }
 
     html += '<button data-action="enviar-lote" class="btn-primary" style="margin-top:8px"' + (lote.fotos.length === 0 ? " disabled" : "") + '>' +
-      '✅ Enviar ' + lote.fotos.length + ' ' + plural(lote.fotos.length, "foto", "fotos") + '</button>';
+      '✅ ' + (ehFachada ? "Enviar foto da fachada" : "Enviar " + lote.fotos.length + " " + plural(lote.fotos.length, "foto", "fotos")) + '</button>';
     html += '</div>';
     return html;
   }
@@ -1429,24 +1411,21 @@
         // Uma vez com foto confirmada, o \u00edcone vira "ver a foto" em vez de
         // reabrir a c\u00e2mera \u2014 pra retirar, usa o bot\u00e3o de apagar ao lado (ou
         // dentro da pr\u00f3pria visualiza\u00e7\u00e3o), e s\u00f3 depois de apagada o \u00edcone
-        // volta a abrir a c\u00e2mera pra uma foto nova. Endere\u00e7o com s\u00f3 1 pacote
-        // usa a c\u00e2mera ao vivo do "Todas" (j\u00e1 pede quem recebeu); com mais de
-        // 1, usa a c\u00e2mera nativa nesse bot\u00e3o individual.
+        // volta a abrir a c\u00e2mera pra uma foto nova. Sempre usa a c\u00e2mera ao
+        // vivo do "Todas" (j\u00e1 pede quem recebeu) \u2014 n\u00e3o tem mais c\u00e2mera
+        // nativa aqui, com endere\u00e7o de 1 ou v\u00e1rios pacotes.
         var botaoFoto;
         if (temFotoPacote) {
           botaoFoto = '<button data-action="ver-foto-pacote" data-id="' + item.id + '" class="pill ativo-entregue">\u2713 Foto</button>' +
             '<button data-action="apagar-foto-pacote" data-id="' + item.id + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>';
-        } else if (qtdMesmoNumero === 1) {
-          botaoFoto = '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
-            (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}") + " Foto</button>";
         } else {
-          botaoFoto = '<button data-action="foto-pacote" data-id="' + item.id + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
+          botaoFoto = '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
             (fotoPacotePendente ? "\u23f3" : "\u{1F4F7}") + " Foto</button>";
         }
         html += '<li id="pacote-' + item.id + '" style="padding:' + recuo + ';border-top:1px solid var(--line)">' +
           '<div data-action="toggle-separado" data-id="' + item.id + '" style="display:flex;align-items:center;gap:10px;font-size:14px;cursor:pointer;margin-bottom:8px">' +
           '<span class="checkbox' + (st.separado ? " done" : "") + '">' + (st.separado ? "\u2713" : "") + "</span>" +
-          '<span' + (st.separado ? ' class="riscado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
+          '<span' + (st.separado ? ' class="nome-separado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
           '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
           botaoFoto +
           "</div></li>";
@@ -1612,9 +1591,6 @@
         marcarEntrega(el.getAttribute("data-id"), el.getAttribute("data-campo"));
       };
     });
-    app.querySelectorAll('[data-action="foto-pacote"]').forEach(function (el) {
-      el.onclick = function () { capturarFotoPacote(el.getAttribute("data-id")); };
-    });
     app.querySelectorAll('[data-action="ver-foto-pacote"]').forEach(function (el) {
       el.onclick = function () { verFotoPacote(el.getAttribute("data-id")); };
     });
@@ -1632,7 +1608,7 @@
       };
     }
     app.querySelectorAll('[data-action="foto-fachada"]').forEach(function (el) {
-      el.onclick = function () { capturarFotoFachada(null, el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
+      el.onclick = function () { abrirFachadaFoto(el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
     });
     app.querySelectorAll('[data-action="foto-lote"]').forEach(function (el) {
       el.onclick = function () { abrirLoteFoto(el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
