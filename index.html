@@ -131,29 +131,6 @@
     var d = new Date();
     return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
   }
-  function mesDeHoje() {
-    var d = new Date();
-    return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0");
-  }
-
-  // Medidor de uso do Cloudinary. A conta do Cloudinary tem 25 créditos
-  // grátis por mês, e 1 crédito = 1 GB guardado OU 1 GB baixado no mês. Não dá
-  // pra perguntar isso pro Cloudinary aqui de dentro do app sem expor a senha
-  // da conta no código (o que qualquer pessoa veria) — então o app vai somando
-  // sozinho: cada upload devolve o tamanho real do arquivo, e cada zip baixado
-  // conta como banda. É uma estimativa por cima (se algo for apagado à mão no
-  // Media Library, o número daqui não diminui), o que é bom: avisa cedo demais
-  // em vez de tarde demais.
-  function somarUsoCloudinary(campo, valor) {
-    if (!fbDb || !valor) return;
-    fbDb.ref("uso_cloudinary/" + campo).transaction(function (atual) { return (atual || 0) + valor; });
-  }
-  function formatarBytes(bytes) {
-    var GB = 1024 * 1024 * 1024;
-    if ((bytes || 0) >= GB) return ((bytes || 0) / GB).toFixed(2).replace(".", ",") + " GB";
-    var mb = (bytes || 0) / (1024 * 1024);
-    return mb.toFixed(mb >= 10 ? 0 : 1).replace(".", ",") + " MB";
-  }
   function diasEntre(dataStr1, dataStr2) {
     var a = new Date(dataStr1 + "T00:00:00");
     var b = new Date(dataStr2 + "T00:00:00");
@@ -235,10 +212,6 @@
       }
       return resp.json();
     }).then(function (dados) {
-      // A resposta do upload traz o tamanho real do arquivo que ficou guardado
-      // — é daqui que sai o medidor de uso do Cloudinary (aba Faixas).
-      somarUsoCloudinary("bytes", dados.bytes);
-      somarUsoCloudinary("fotos", 1);
       return dados.secure_url;
     });
   }
@@ -716,11 +689,7 @@
     enviandoFila: false,
     loteFoto: null,
     fotoVisualizando: null,
-    bipeAtivo: true,
-    // Faixas da nuvem que são DIFERENTES das deste aparelho — só fica
-    // preenchido pra mostrar o aviso na aba Faixas; nada é trocado sozinho.
-    faixasNuvem: null,
-    usoCloudinary: null
+    bipeAtivo: true
   };
 
   function carregar(chave, padrao) {
@@ -745,8 +714,9 @@
   // Regra de ouro pra nunca apagar o trabalho de ninguém sem querer:
   //  - aparelho SEM faixas e nuvem COM faixas  -> baixa sozinho (é o caso de
   //    restaurar num celular novo, ou de um colega entrando na rota);
-  //  - aparelho JÁ COM faixas diferentes das da nuvem -> não mexe em nada,
-  //    só mostra um aviso na aba Faixas deixando você escolher qual vale.
+  //  - aparelho JÁ COM faixas -> a daqui manda, sem nunca ser trocada sozinha
+  //    pela da nuvem; a próxima alteração feita aqui é que sobe e vira a
+  //    versão oficial da rota.
   function normalizarMapaRuas(lista) {
     return (lista || []).map(function (r) {
       var m = Object.assign({ cores: coresPadrao() }, r, { cores: r.cores || coresPadrao() });
@@ -766,34 +736,11 @@
       };
     });
   }
-  function assinaturaFaixas(lista) {
-    return normalizarMapaRuas(lista).map(function (r) {
-      var c = r.cores || coresPadrao();
-      return [r.id, r.nome, r.fragmentar ? 1 : 0, c.par1, c.par2, c.impar1, c.impar2].join("|");
-    }).join("~");
-  }
   function enviarFaixasParaNuvem() {
     if (!fbDb || !state.minhaRota) return;
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
     fbDb.ref("lotes/" + chaveRota + "/faixas").set({ ruas: faixasParaNuvem(), ts: Date.now() });
   }
-  function usarFaixasDaNuvem() {
-    if (!state.faixasNuvem) return;
-    if (!confirm("Trazer as Faixas da nuvem pra este aparelho? As ruas e cores configuradas aqui agora serão substituídas.")) return;
-    state.mapaRuas = state.faixasNuvem;
-    state.faixasNuvem = null;
-    // Salva só localmente de propósito: acabou de vir da nuvem, não precisa
-    // (nem deve) ser reenviado pra lá.
-    salvar("mapa-ruas", state.mapaRuas);
-    render();
-  }
-  function enviarMinhasFaixas() {
-    if (!confirm("Mandar as Faixas deste aparelho pra nuvem? Elas passam a valer pra quem usa esse mesmo código de rota.")) return;
-    state.faixasNuvem = null;
-    enviarFaixasParaNuvem();
-    render();
-  }
-
   function salvarSessao() {
     salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus });
   }
@@ -920,7 +867,6 @@
   function conectarRota(rota) {
     desconectarRota();
     state.rotaConectada = false;
-    state.faixasNuvem = null;
     if (!fbDb || !rota) return;
     var chaveRota = sanitizarChaveFirebase(rota);
     fbDb.ref("rotas_registradas/" + chaveRota).set(Date.now());
@@ -934,26 +880,16 @@
       if (!ruasRemotas) {
         // Nuvem ainda sem nada pra essa rota: se este aparelho já tem faixas
         // configuradas, ele vira a fonte e faz o primeiro backup.
-        state.faixasNuvem = null;
         if (state.mapaRuas.length) enviarFaixasParaNuvem();
-        render();
         return;
       }
-      if (!state.mapaRuas.length) {
-        // Aparelho sem nada configurado: baixa sem perguntar, porque não há o
-        // que perder aqui (celular novo, navegador limpo, ou colega entrando
-        // na rota pela primeira vez).
-        state.faixasNuvem = null;
-        state.mapaRuas = normalizarMapaRuas(ruasRemotas);
-        salvar("mapa-ruas", state.mapaRuas);
-        render();
-        return;
-      }
-      // Os dois lados têm configuração: nunca decide sozinho — se for
-      // diferente, guarda a da nuvem só pra oferecer na tela.
-      state.faixasNuvem = (assinaturaFaixas(state.mapaRuas) === assinaturaFaixas(ruasRemotas))
-        ? null
-        : normalizarMapaRuas(ruasRemotas);
+      // Este aparelho já tem faixas: a daqui manda, e nada é trocado sozinho.
+      if (state.mapaRuas.length) return;
+      // Aparelho sem nada configurado: restaura da nuvem, porque não há o que
+      // perder aqui (celular novo, navegador limpo, ou colega entrando na
+      // rota pela primeira vez).
+      state.mapaRuas = normalizarMapaRuas(ruasRemotas);
+      salvar("mapa-ruas", state.mapaRuas);
       render();
     };
     refFaixasAtual.on("value", callbackFaixasAtual);
@@ -1053,17 +989,6 @@
     fbDb.ref("rotas_registradas").on("value", function (snap) {
       var v = snap.val();
       state.totalRotas = v ? Object.keys(v).length : 0;
-      render();
-    });
-    fbDb.ref("uso_cloudinary").on("value", function (snap) {
-      var v = snap.val();
-      if (!v) { state.usoCloudinary = null; render(); return; }
-      var mensal = v.banda_mensal || {};
-      state.usoCloudinary = {
-        bytes: v.bytes || 0,
-        fotos: v.fotos || 0,
-        bandaMes: mensal[mesDeHoje()] || 0
-      };
       render();
     });
   }
@@ -1187,17 +1112,9 @@
         // antiga) — é o que faz o Google Fotos (que mostra o mais recente
         // primeiro) respeitar a mesma ordem das pastas.
         var agora = Date.now();
-        var totalBaixado = 0;
         itensParaBuscar.forEach(function (it, i) {
-          if (!blobs[i]) return;
-          totalBaixado += blobs[i].size;
-          zip.folder(it.nomePasta).file(it.nomeArquivo, blobs[i], { date: new Date(agora - i * 10000) });
+          if (blobs[i]) zip.folder(it.nomePasta).file(it.nomeArquivo, blobs[i], { date: new Date(agora - i * 10000) });
         });
-        // Baixar o zip puxa cada foto de volta do Cloudinary, e isso consome
-        // "banda" — que no plano grátis sai do mesmo bolo de 25 créditos que o
-        // armazenamento. Guardado por mês porque a banda zera todo mês
-        // (diferente do armazenamento, que é um total que só cresce).
-        somarUsoCloudinary("banda_mensal/" + mesDeHoje(), totalBaixado);
         return zip.generateAsync({ type: "blob" });
       }).then(function (blob) {
         var url = URL.createObjectURL(blob);
@@ -1728,43 +1645,6 @@
     return html;
   }
 
-  // Aviso (não automático de propósito) de que a nuvem tem uma configuração de
-  // Faixas diferente da deste aparelho. Nada é trocado até você escolher.
-  function renderAvisoFaixasNuvem() {
-    if (!state.faixasNuvem) return "";
-    var nNuvem = state.faixasNuvem.length;
-    var nAqui = state.mapaRuas.length;
-    return '<div class="warn-box" style="margin-bottom:16px">' +
-      '<p style="margin:0 0 4px;font-weight:700">As Faixas da nuvem estão diferentes das deste aparelho.</p>' +
-      '<p style="margin:0 0 10px">Na nuvem: ' + nNuvem + " " + plural(nNuvem, "rua", "ruas") + " · aqui: " + nAqui + " " + plural(nAqui, "rua", "ruas") +
-      ". Não mexi em nada — escolha qual vale.</p>" +
-      '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-      '<button data-action="usar-faixas-nuvem" class="pill">⬇️ Usar a da nuvem</button>' +
-      '<button data-action="enviar-faixas-nuvem" class="pill">⬆️ Manter a minha e enviar</button>' +
-      "</div></div>";
-  }
-
-  // Medidor do plano grátis do Cloudinary (25 créditos/mês; 1 crédito = 1 GB
-  // guardado ou 1 GB baixado no mês). Some enquanto ninguém tiver enviado
-  // nenhuma foto ainda.
-  function renderUsoCloudinary() {
-    var u = state.usoCloudinary;
-    if (!u || (!u.bytes && !u.bandaMes)) return "";
-    var GB = 1024 * 1024 * 1024;
-    var creditos = (u.bytes / GB) + (u.bandaMes / GB);
-    var pct = Math.max(2, Math.min(100, Math.round((creditos / 25) * 100)));
-    var cor = creditos >= 21 ? "var(--alert)" : (creditos >= 15 ? "var(--accent-deep)" : "var(--ok)");
-    return '<div class="card" style="padding:12px;margin-bottom:16px">' +
-      '<p style="font-size:11px;font-weight:600;margin:0 0 8px;opacity:.65">USO DO CLOUDINARY (PLANO GRÁTIS)</p>' +
-      '<div style="height:8px;border-radius:999px;background:var(--paper-deep);overflow:hidden;margin-bottom:8px">' +
-      '<div style="height:100%;width:' + pct + '%;background:' + cor + '"></div></div>' +
-      '<p style="font-size:13px;font-weight:700;margin:0;color:' + cor + '">≈ ' + creditos.toFixed(1).replace(".", ",") + " de 25 créditos usados</p>" +
-      '<p style="font-size:11px;margin:6px 0 0;opacity:.7">' + formatarNumero(u.fotos || 0) + " " + plural(u.fotos || 0, "foto guardada", "fotos guardadas") +
-      " · " + formatarBytes(u.bytes) + " no total<br>" + formatarBytes(u.bandaMes) + " baixado neste mês (zips)</p>" +
-      '<p style="font-size:10px;margin:6px 0 0;opacity:.5">Conta somada pelo próprio app, por cima — se apagar fotos à mão no Cloudinary, o número daqui não diminui.</p>' +
-      "</div>";
-  }
-
   function renderMapa() {
     var statusTexto = !fbDb
       ? "sem conex\u00e3o com o Firebase \u2014 tudo funciona s\u00f3 neste aparelho."
@@ -1788,9 +1668,6 @@
         ? "\u2713 Faixas com c\u00f3pia de seguran\u00e7a na nuvem"
         : "\u26a0 Faixas s\u00f3 neste aparelho \u2014 sem o c\u00f3digo da rota, elas se perdem se o celular resetar") + "</p>" +
       "</div>";
-
-    html += renderAvisoFaixasNuvem();
-    html += renderUsoCloudinary();
 
     html += '<p class="muted" style="font-size:14px;margin-bottom:16px">Cadastre suas ruas, a faixa completa (se quiser fragmentar) e escolha as cores. Uma vez s\u00f3 \u2014 elas quase n\u00e3o mudam.</p>';
     html += '<div class="card" style="padding:10px;margin-bottom:16px;display:flex;gap:8px">' +
@@ -1931,11 +1808,6 @@
     if (baixarZipBtn) baixarZipBtn.onclick = baixarFotosDoDia;
     var reenviarBtn = app.querySelector('[data-action="reenviar-pendentes"]');
     if (reenviarBtn) reenviarBtn.onclick = tentarReenviarFila;
-
-    var usarFaixasNuvemBtn = app.querySelector('[data-action="usar-faixas-nuvem"]');
-    if (usarFaixasNuvemBtn) usarFaixasNuvemBtn.onclick = usarFaixasDaNuvem;
-    var enviarFaixasNuvemBtn = app.querySelector('[data-action="enviar-faixas-nuvem"]');
-    if (enviarFaixasNuvemBtn) enviarFaixasNuvemBtn.onclick = enviarMinhasFaixas;
 
     var novoNomeEl = document.getElementById("novoNomeRua");
     if (novoNomeEl) novoNomeEl.oninput = function () { state.novoNomeRua = novoNomeEl.value; };
