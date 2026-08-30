@@ -125,7 +125,18 @@
     CLOUDINARY_UPLOAD_PRESET.indexOf("COLE_AQUI") === -1
   );
   function sanitizarChaveFirebase(s) {
-    return (s || "").replace(/[.#$\[\]\/]/g, "-").trim();
+    // Duas pessoas digitando "o mesmo" código de rota nem sempre digitam
+    // exatamente igual (maiúscula/minúscula, espaço a mais ou a menos) — isso
+    // fazia cada aparelho cair num caminho diferente no Firebase e parecer
+    // que nada sincronizou. Por isso a CHAVE usada lá dentro é sempre
+    // normalizada (maiúsculas, espaços únicos, sem sobra nas pontas), mesmo
+    // que o campo na tela continue mostrando o código do jeito que a pessoa
+    // digitou.
+    return (s || "")
+      .trim()
+      .replace(/\s+/g, " ")
+      .toUpperCase()
+      .replace(/[.#$\[\]\/]/g, "-");
   }
   function dataDeHoje() {
     var d = new Date();
@@ -689,7 +700,9 @@
     enviandoFila: false,
     loteFoto: null,
     fotoVisualizando: null,
-    bipeAtivo: true
+    bipeAtivo: true,
+    faixasSyncErro: false,
+    restaurandoFaixas: false
   };
 
   function carregar(chave, padrao) {
@@ -739,7 +752,46 @@
   function enviarFaixasParaNuvem() {
     if (!fbDb || !state.minhaRota) return;
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-    fbDb.ref("lotes/" + chaveRota + "/faixas").set({ ruas: faixasParaNuvem(), ts: Date.now() });
+    fbDb.ref("lotes/" + chaveRota + "/faixas").set({ ruas: faixasParaNuvem(), ts: Date.now() })
+      .then(function () {
+        if (state.faixasSyncErro) { state.faixasSyncErro = false; render(); }
+      })
+      .catch(function () {
+        // Antes, se esse envio falhasse (sem internet, etc.), ninguém ficava
+        // sabendo — a mensagem "com cópia de segurança na nuvem" continuava
+        // verde mesmo sem nada ter chegado lá. Agora avisa.
+        state.faixasSyncErro = true;
+        render();
+      });
+  }
+  // Puxa manualmente as Faixas que estão na nuvem pra este aparelho — pro caso
+  // (como o do celular que entrou na rota e não puxou sozinho) de precisar
+  // trazer de novo sem precisar mexer em cada rua uma por uma. Sempre pede
+  // confirmação, porque substitui o que já estiver cadastrado aqui.
+  function restaurarFaixasDaNuvem() {
+    if (!fbDb || !state.minhaRota) return;
+    var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+    state.restaurandoFaixas = true;
+    render();
+    fbDb.ref("lotes/" + chaveRota + "/faixas").once("value").then(function (snapshot) {
+      state.restaurandoFaixas = false;
+      var remoto = snapshot.val();
+      var ruasRemotas = (remoto && remoto.ruas && remoto.ruas.length) ? remoto.ruas : null;
+      if (!ruasRemotas) {
+        alert("Ainda não tem nenhuma Faixa salva na nuvem pra essa rota.");
+        render();
+        return;
+      }
+      var aviso = "Isso substitui as ruas cadastradas NESTE aparelho pelas " + ruasRemotas.length + " que estão na nuvem pra essa rota. Continuar?";
+      if (!confirm(aviso)) { render(); return; }
+      state.mapaRuas = normalizarMapaRuas(ruasRemotas);
+      salvar("mapa-ruas", state.mapaRuas);
+      render();
+    }).catch(function () {
+      state.restaurandoFaixas = false;
+      alert("Não consegui buscar a nuvem agora. Confira a internet e tente de novo.");
+      render();
+    });
   }
   function salvarSessao() {
     salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus });
@@ -1757,12 +1809,18 @@
       "</div>" +
       '<p style="font-size:11px;margin:8px 0 0;color:' + statusCor + '">' + statusTexto + "</p>" +
       (fbDb && state.totalRotas > 0 ? '<p style="font-size:11px;margin:6px 0 0;opacity:.55">' + formatarNumero(state.totalRotas) + " " + plural(state.totalRotas, "rota diferente j\u00e1 usou", "rotas diferentes j\u00e1 usaram") + " essa ferramenta</p>" : "") +
-      '<p style="font-size:11px;margin:6px 0 0;color:' + (fbDb && state.minhaRota ? "var(--ok)" : "var(--alert)") + '">' +
-      (fbDb && state.minhaRota
-        ? "\u2713 Faixas com c\u00f3pia de seguran\u00e7a na nuvem"
-        : "\u26a0 Faixas s\u00f3 neste aparelho \u2014 sem o c\u00f3digo da rota, elas se perdem se o celular resetar") + "</p>" +
+      '<p style="font-size:11px;margin:6px 0 0;color:' + (fbDb && state.minhaRota && !state.faixasSyncErro ? "var(--ok)" : "var(--alert)") + '">' +
+      (!fbDb || !state.minhaRota
+        ? "\u26a0 Faixas s\u00f3 neste aparelho \u2014 sem o c\u00f3digo da rota, elas se perdem se o celular resetar"
+        : state.faixasSyncErro
+        ? "\u26a0 N\u00e3o consegui enviar as Faixas pra nuvem agora (sem internet?) \u2014 continuam salvas s\u00f3 neste aparelho por enquanto"
+        : state.mapaRuas.length === 0
+        ? "assim que cadastrar uma rua abaixo, ela j\u00e1 sobe pra nuvem sozinha"
+        : "\u2713 Faixas com c\u00f3pia de seguran\u00e7a na nuvem") + "</p>" +
       (state.minhaRota
-        ? '<div style="display:flex;justify-content:flex-end;margin-top:10px"><button data-action="sair-rota" class="pill">Sair da rota</button></div>'
+        ? '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:10px">' +
+          (fbDb ? '<button data-action="restaurar-faixas-nuvem" class="pill"' + (state.restaurandoFaixas ? " disabled" : "") + '>' + (state.restaurandoFaixas ? "Buscando..." : "\u2601 Restaurar da nuvem") + "</button>" : "") +
+          '<button data-action="sair-rota" class="pill">Sair da rota</button></div>'
         : "") +
       "</div>";
 
@@ -1920,6 +1978,8 @@
     };
     var sairRotaBtn = app.querySelector('[data-action="sair-rota"]');
     if (sairRotaBtn) sairRotaBtn.onclick = sairDaRota;
+    var restaurarFaixasBtn = app.querySelector('[data-action="restaurar-faixas-nuvem"]');
+    if (restaurarFaixasBtn) restaurarFaixasBtn.onclick = restaurarFaixasDaNuvem;
     app.querySelectorAll('[data-action="del-rua"]').forEach(function (el) {
       el.onclick = function () { removerRua(el.getAttribute("data-id")); };
     });
