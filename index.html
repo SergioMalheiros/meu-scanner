@@ -1027,6 +1027,29 @@
     render();
   }
 
+  // Sair da rota: desliga a sincronização e devolve este aparelho pro modo
+  // "só aqui". Leva junto a lista do dia (ela é da rota — não faz sentido
+  // continuar aberta fora dela) e o progresso local, mas NÃO mexe em nada na
+  // nuvem: lista, marcações e fotos seguem lá pros colegas. As Faixas ficam,
+  // porque são a sua configuração de ruas, não uma coisa do dia.
+  function sairDaRota() {
+    if (!state.minhaRota) return;
+    var aviso = "Sair da rota " + state.minhaRota + " neste aparelho?\n\n" +
+      "A lista de hoje sai daqui, mas continua na nuvem pros outros. Suas ruas (Faixas) ficam.";
+    if (state.filaPendente.length) {
+      aviso += "\n\nAten\u00e7\u00e3o: ainda " + (state.filaPendente.length === 1 ? "h\u00e1 1 foto esperando envio" : "h\u00e1 " + state.filaPendente.length + " fotos esperando envio") + ".";
+    }
+    if (!confirm(aviso)) return;
+    desconectarRota();
+    state.minhaRota = "";
+    state.rotaConectada = false;
+    salvar("minha-rota", "");
+    state.textoColado = ""; state.linhasParseadas = null; state.pacoteStatus = {};
+    state.entregaInfo = {}; state.fachadaInfo = {};
+    salvarSessao();
+    render();
+  }
+
   function sincronizarPacote(id) {
     if (!fbDb || !state.minhaRota || !state.linhasParseadas) return;
     var linha = state.linhasParseadas.find(function (l) { return l.id === id; });
@@ -1738,6 +1761,9 @@
       (fbDb && state.minhaRota
         ? "\u2713 Faixas com c\u00f3pia de seguran\u00e7a na nuvem"
         : "\u26a0 Faixas s\u00f3 neste aparelho \u2014 sem o c\u00f3digo da rota, elas se perdem se o celular resetar") + "</p>" +
+      (state.minhaRota
+        ? '<div style="display:flex;justify-content:flex-end;margin-top:10px"><button data-action="sair-rota" class="pill">Sair da rota</button></div>'
+        : "") +
       "</div>";
 
     html += '<p class="muted" style="font-size:14px;margin-bottom:16px">Cadastre suas ruas, a faixa completa (se quiser fragmentar) e escolha as cores. Uma vez s\u00f3 \u2014 elas quase n\u00e3o mudam.</p>';
@@ -1887,8 +1913,13 @@
     var salvarRotaBtn = app.querySelector('[data-action="salvar-rota"]');
     if (salvarRotaBtn) salvarRotaBtn.onclick = function () {
       var v = document.getElementById("minhaRotaInput").value.trim();
+      // Apagar o campo e clicar em Salvar antes não fazia absolutamente nada
+      // (o código voltava sozinho na tela seguinte) — agora vale como sair.
       if (v) salvarMinhaRota(v);
+      else sairDaRota();
     };
+    var sairRotaBtn = app.querySelector('[data-action="sair-rota"]');
+    if (sairRotaBtn) sairRotaBtn.onclick = sairDaRota;
     app.querySelectorAll('[data-action="del-rua"]').forEach(function (el) {
       el.onclick = function () { removerRua(el.getAttribute("data-id")); };
     });
