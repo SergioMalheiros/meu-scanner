@@ -816,10 +816,45 @@
     definirCor(ruaId, campo, cor);
   }
 
+  // ---------- lista do dia na nuvem ----------
+  // Antes, a lista colada ficava só no aparelho de quem colou — os outros que
+  // trabalham na mesma rota tinham que colar tudo de novo, cada um no seu
+  // celular. Agora ela sobe junto com a rota: quem entra depois só põe o
+  // código da rota e já cai com a lista pronta, com o progresso e as fotos de
+  // quem já começou. Fica guardada por data, então vira o dia e some sozinha.
+  //
+  // Modelo simples de propósito: a lista da nuvem é A lista do dia da rota.
+  // Quem organizar por último vale pra todo mundo — do mesmo jeito que hoje
+  // só uma pessoa cola a lista pra todos.
+  function enviarListaParaNuvem() {
+    if (!fbDb || !state.minhaRota) return;
+    fbDb.ref("lotes/" + sanitizarChaveFirebase(state.minhaRota) + "/lista/" + dataDeHoje())
+      .set({ texto: state.textoColado, ts: Date.now() });
+  }
+  function removerListaDaNuvem() {
+    if (!fbDb || !state.minhaRota) return;
+    fbDb.ref("lotes/" + sanitizarChaveFirebase(state.minhaRota) + "/lista/" + dataDeHoje()).remove();
+  }
+  // Depois de adotar a lista da nuvem, o que já foi separado/fotografado
+  // precisa ser lido de novo: os listeners de pacotes e entregas só disparam
+  // quando algo MUDA lá, e eles já tinham rodado sem efeito nenhum antes de
+  // existir lista aqui pra casar os códigos. Reaproveita os próprios
+  // callbacks, então a regra de aplicar é uma só.
+  function recarregarProgressoDaRota(chaveRota, data) {
+    if (!fbDb) return;
+    fbDb.ref("lotes/" + chaveRota + "/pacotes").once("value").then(function (snap) {
+      if (callbackPacotesAtual) callbackPacotesAtual(snap);
+    }).catch(function () {});
+    fbDb.ref("lotes/" + chaveRota + "/entregas/" + data).once("value").then(function (snap) {
+      if (callbackEntregasAtual) callbackEntregasAtual(snap);
+    }).catch(function () {});
+  }
+
   function organizarPacotes() {
     state.linhasParseadas = parseLinhas(state.textoColado);
     state.encontrados = {};
     salvarSessao();
+    enviarListaParaNuvem();
     render();
   }
   var refPacotesAtual = null;
@@ -830,16 +865,20 @@
   var callbackFachadasAtual = null;
   var refFaixasAtual = null;
   var callbackFaixasAtual = null;
+  var refListaAtual = null;
+  var callbackListaAtual = null;
 
   function desconectarRota() {
     if (refPacotesAtual && callbackPacotesAtual) refPacotesAtual.off("value", callbackPacotesAtual);
     if (refEntregasAtual && callbackEntregasAtual) refEntregasAtual.off("value", callbackEntregasAtual);
     if (refFachadasAtual && callbackFachadasAtual) refFachadasAtual.off("value", callbackFachadasAtual);
     if (refFaixasAtual && callbackFaixasAtual) refFaixasAtual.off("value", callbackFaixasAtual);
+    if (refListaAtual && callbackListaAtual) refListaAtual.off("value", callbackListaAtual);
     refPacotesAtual = null; callbackPacotesAtual = null;
     refEntregasAtual = null; callbackEntregasAtual = null;
     refFachadasAtual = null; callbackFachadasAtual = null;
     refFaixasAtual = null; callbackFaixasAtual = null;
+    refListaAtual = null; callbackListaAtual = null;
   }
 
   function limparFotosAntigas(chaveRota) {
@@ -955,6 +994,30 @@
       render();
     };
     refPacotesAtual.on("value", callbackPacotesAtual, function () { state.rotaConectada = false; render(); });
+
+    // Assinado por último de propósito: quando a lista da nuvem chega, ela
+    // chama os callbacks de pacotes/entregas acima, que já precisam existir.
+    refListaAtual = fbDb.ref("lotes/" + chaveRota + "/lista/" + data);
+    callbackListaAtual = function (snapshot) {
+      var remoto = snapshot.val();
+      var texto = (remoto && typeof remoto.texto === "string") ? remoto.texto : "";
+      // Nuvem sem lista pra hoje: não mexe em nada aqui (é o caso de alguém
+      // ter limpado — quem já está com a lista aberta continua trabalhando).
+      if (!texto.trim()) return;
+      // Já é exatamente essa lista: nada a fazer (evita re-render à toa e
+      // volta-e-meia depois do próprio envio).
+      if (texto === state.textoColado && state.linhasParseadas) return;
+      state.textoColado = texto;
+      state.linhasParseadas = parseLinhas(texto);
+      // Zera o progresso local antes de reaplicar o da nuvem: se este
+      // aparelho tinha uma lista antiga, as marcações dela são de outros
+      // pacotes e não valem mais nada aqui.
+      state.pacoteStatus = {};
+      salvarSessao();
+      recarregarProgressoDaRota(chaveRota, data);
+      render();
+    };
+    refListaAtual.on("value", callbackListaAtual);
   }
 
   function salvarMinhaRota(rota) {
@@ -1016,8 +1079,16 @@
     render();
   }
   function limparSessao() {
+    // Ganhou confirmação porque agora também tira a lista compartilhada da
+    // rota (senão, ao recarregar a página, a lista antiga voltaria da nuvem).
+    // Não apaga a lista que já está aberta no celular dos outros: eles seguem
+    // trabalhando até alguém organizar uma lista nova.
+    var aviso = "Limpar a lista de hoje e começar um novo dia?";
+    if (fbDb && state.minhaRota) aviso += "\n\nA lista compartilhada da rota " + state.minhaRota + " também sai — quem já está com ela aberta continua trabalhando normal.";
+    if (!confirm(aviso)) return;
     state.textoColado = ""; state.linhasParseadas = null; state.pacoteStatus = {};
     salvarSessao();
+    removerListaDaNuvem();
     render();
   }
 
