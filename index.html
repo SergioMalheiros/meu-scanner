@@ -693,6 +693,48 @@
     });
   }
 
+  // Um número que é SHOPPING não tem porteiro recebendo tudo: cada nome da
+  // lista é uma loja e quem assina é uma pessoa diferente em cada uma. Nesse
+  // caso o endereço entra em modo "loja por loja" e cada pacote ganha seu
+  // próprio campo de quem recebeu.
+  //
+  // Entra nesse modo de três formas, pra nunca ficar preso no jeito errado:
+  //   1. o entregador toca no botão "loja por loja";
+  //   2. algum pacote daquele número já tem 2 fotos (pacote + frente da loja),
+  //      que é exatamente o que se faz num shopping;
+  //   3. os pacotes daquele número já têm nomes DIFERENTES de quem recebeu
+  //      (um campo só não conseguiria nem mostrar isso direito).
+  function enderecoEhIndividual(chaveEndereco, itens) {
+    if (state.enderecosIndividuais[chaveEndereco]) return true;
+    var nomes = {};
+    var achouDuasFotos = false;
+    itens.forEach(function (it) {
+      if (fotosDoPacote(it.id).length >= 2) achouDuasFotos = true;
+      var q = (state.entregaInfo[it.id] && state.entregaInfo[it.id].quemRecebeu) || "";
+      if (q) nomes[q] = true;
+    });
+    return achouDuasFotos || Object.keys(nomes).length > 1;
+  }
+  function alternarEnderecoIndividual(chaveEndereco, ruaNome, numero) {
+    if (state.enderecosIndividuais[chaveEndereco]) {
+      delete state.enderecosIndividuais[chaveEndereco];
+      // Voltar pro modo "um nome pra todos" com nomes diferentes gravados
+      // deixaria o endereço num estado que o campo único não representa —
+      // então limpa os nomes e recomeça (o de cima passa a valer de novo).
+      var linhas = linhasDoEndereco(ruaNome, numero);
+      var nomesDiferentes = {};
+      linhas.forEach(function (l) {
+        var q = (state.entregaInfo[l.id] && state.entregaInfo[l.id].quemRecebeu) || "";
+        if (q) nomesDiferentes[q] = true;
+      });
+      if (Object.keys(nomesDiferentes).length > 1) aplicarQuemRecebeuEndereco(ruaNome, numero, "", true);
+    } else {
+      state.enderecosIndividuais[chaveEndereco] = true;
+    }
+    salvarSessao();
+    render();
+  }
+
   var PALETA_CORES = ["#E53935", "#FB8C00", "#FDD835", "#43A047", "#00897B", "#1E88E5", "#3949AB", "#8E24AA", "#D81B60", "#6D4C41"];
   // cinza neutro das caixas de rua ainda não cadastrada nas Faixas — de
   // propósito fora da paleta, pra não ser confundido com uma cor de separação.
@@ -839,7 +881,10 @@
     fotoVisualizando: null,
     bipeAtivo: true,
     faixasSyncErro: false,
-    restaurandoFaixas: false
+    restaurandoFaixas: false,
+    // Endereços marcados como "loja por loja" (shopping): em vez de um nome
+    // de quem recebeu pro número inteiro, cada pacote tem o seu.
+    enderecosIndividuais: {}
   };
 
   function carregar(chave, padrao) {
@@ -931,7 +976,7 @@
     });
   }
   function salvarSessao() {
-    salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus });
+    salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais });
   }
 
   // Foco a restaurar depois de tirar uma foto. A câmera nativa do celular tira
@@ -960,6 +1005,7 @@
     state.textoColado = sess.texto || "";
     state.linhasParseadas = sess.linhas || null;
     state.pacoteStatus = sess.pacoteStatus || {};
+    state.enderecosIndividuais = sess.enderecosIndividuais || {};
   }
 
   function adicionarRua() {
@@ -1044,6 +1090,12 @@
     state.encontrados = {};
     salvarSessao();
     enviarListaParaNuvem();
+    // Puxa de volta o que a rota já tem hoje (o que o colega já separou, as
+    // fotos e os nomes de quem recebeu). Sem isso, quem colava a lista num
+    // aparelho novo começava do zero na tela mesmo com a rota já andando —
+    // os avisos da nuvem só chegam quando ALGUÉM grava algo novo, e aqui
+    // ninguém tinha gravado ainda.
+    if (fbDb && state.minhaRota) recarregarProgressoDaRota(sanitizarChaveFirebase(state.minhaRota), dataDeHoje());
     render();
   }
   var refPacotesAtual = null;
@@ -1396,6 +1448,12 @@
         });
         // Guarda também no nível do endereço, pra ir no nome da pasta do zip.
         if (!porChave[it.chave].quemRecebeu && it.quemRecebeu) porChave[it.chave].quemRecebeu = it.quemRecebeu;
+        // Shopping: cada pacote foi recebido por uma loja diferente. Aí não
+        // dá pra pôr um nome só na pasta — ela vira "VARIAS-LOJAS" e o nome
+        // de quem recebeu em cada loja fica no nome de cada arquivo.
+        if (it.quemRecebeu && porChave[it.chave].quemRecebeu && it.quemRecebeu !== porChave[it.chave].quemRecebeu) {
+          porChave[it.chave].variasLojas = true;
+        }
       });
       // "fachadas" aqui é o acervo permanente da rota inteira (todos os
       // endereços já fotografados, de qualquer dia) — só entra no zip de hoje
@@ -1430,8 +1488,10 @@
         // Nome da pasta já sai com rua, número e quem recebeu juntos, pra na
         // hora de dar baixa no app da J&T não precisar abrir nada — só olhar
         // o nome da pasta.
-        var nomePasta = String(idx + 1).padStart(digitosOrdem, "0") + "_" + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero +
-          (g.quemRecebeu ? "_" + sanitizarChaveFirebase(g.quemRecebeu).replace(/\s+/g, "-") : "");
+        var sufixoPasta = g.variasLojas
+          ? "_VARIAS-LOJAS"
+          : (g.quemRecebeu ? "_" + sanitizarChaveFirebase(g.quemRecebeu).replace(/\s+/g, "-") : "");
+        var nomePasta = String(idx + 1).padStart(digitosOrdem, "0") + "_" + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero + sufixoPasta;
         if (g.fotoFachadaUrl) {
           itensParaBuscar.push({ nomePasta: nomePasta, nomeArquivo: "fachada.jpg", url: g.fotoFachadaUrl });
         }
@@ -1794,6 +1854,8 @@
   function renderLoteFoto() {
     var lote = state.loteFoto;
     var ehFachada = lote.tipo === "fachada";
+    var chaveLote = ehFachada ? "" : chaveOrdenavel(lote.ruaNome, lote.numero);
+    var lojaPorLojaLote = !ehFachada && lote.itens.length > 1 && enderecoEhIndividual(chaveLote, lote.itens);
     var quemRecebeuLote = "";
     for (var qi = 0; qi < lote.itens.length; qi++) {
       var qv = (state.entregaInfo[lote.itens[qi].id] && state.entregaInfo[lote.itens[qi].id].quemRecebeu) || "";
@@ -1811,10 +1873,15 @@
       '<p style="font-size:12px;opacity:.65;margin:2px 0 0">' + infoLinha + '</p></div>' +
       '<button data-action="cancelar-lote" style="border:none;background:none;font-size:22px;color:var(--ink);opacity:.6;cursor:pointer;flex-shrink:0">✕</button></div>';
 
-    if (!ehFachada) {
-      // Nome de quem recebeu esse lote inteiro — não pergunta nome por pacote
-      // (na entrega ninguém confere isso, só pega tudo do número e fotografa).
-      // Fachada não pergunta isso — é só a foto do prédio.
+    if (!ehFachada && lote.itens.length > 1) {
+      // Dá pra virar a chave aqui dentro também: normalmente é na hora de
+      // fotografar que se percebe que aquele número é shopping.
+      html += '<button data-action="alternar-individual-lote" data-chave="' + chaveLote + '" class="pill' + (lojaPorLojaLote ? " ativo-entregue" : "") + '" style="margin-bottom:10px">' +
+        (lojaPorLojaLote ? "\ud83c\udfea Loja por loja" : "\ud83c\udfe2 Um nome pra todos") + "</button>";
+    }
+    if (!ehFachada && !lojaPorLojaLote) {
+      // Prédio: um nome só (o porteiro) vale pro número inteiro — ninguém
+      // confere nome por nome na portaria. Fachada não pergunta isso.
       html += '<input id="quemRecebeuLoteInput" value="' + esc(quemRecebeuLote) + '" placeholder="Quem recebeu esse lote? (ex: porteiro)" style="width:100%;font-size:13px;padding:8px 10px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light);margin-bottom:12px;box-sizing:border-box" />';
     }
 
@@ -1870,9 +1937,17 @@
       html += '<div style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">';
       lote.itens.forEach(function (linha, idx) {
         var n = fotosDoItemLote(lote, idx);
-        html += '<div style="display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:3px 0;opacity:' + (n ? "1" : ".5") + '">' +
+        html += '<div style="padding:' + (lojaPorLojaLote ? "6px 0 10px" : "3px 0") + ';opacity:' + (n ? "1" : ".55") + '">' +
+          '<div style="display:flex;justify-content:space-between;gap:10px;font-size:12px">' +
           '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (idx + 1) + '. ' + esc(nomeItemLote(linha, idx)) + '</span>' +
-          '<span style="flex-shrink:0;font-weight:700;color:' + (n >= 2 ? "var(--ok)" : "var(--ink)") + '">' + (n ? "\ud83d\udcf7 " + n : "sem foto") + '</span></div>';
+          '<span style="flex-shrink:0;font-weight:700;color:' + (n >= 2 ? "var(--ok)" : "var(--ink)") + '">' + (n ? "\ud83d\udcf7 " + n : "sem foto") + '</span></div>' +
+          // Num shopping, quem assina é a pessoa daquela loja: o campo fica
+          // junto do nome dela, aqui mesmo na câmera, pra preencher na hora
+          // da entrega sem ter que voltar pra lista.
+          (lojaPorLojaLote
+            ? '<input data-action="quem-recebeu-lote-item" data-id="' + linha.id + '" value="' + esc((state.entregaInfo[linha.id] && state.entregaInfo[linha.id].quemRecebeu) || "") + '" placeholder="Quem recebeu nessa loja" style="width:100%;box-sizing:border-box;margin-top:5px;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />'
+            : "") +
+          '</div>';
       });
       html += '</div>';
     }
@@ -1906,6 +1981,21 @@
       var loteRuaNome = state.loteFoto.ruaNome, loteNumero = state.loteFoto.numero;
       quemRecebeuLoteInput.oninput = function () { aplicarQuemRecebeuEndereco(loteRuaNome, loteNumero, quemRecebeuLoteInput.value, false); };
       quemRecebeuLoteInput.onblur = function () { aplicarQuemRecebeuEndereco(loteRuaNome, loteNumero, quemRecebeuLoteInput.value, true); };
+    }
+    app.querySelectorAll('[data-action="quem-recebeu-lote-item"]').forEach(function (el) {
+      var id = el.getAttribute("data-id");
+      el.oninput = function () {
+        if (!state.entregaInfo[id]) state.entregaInfo[id] = {};
+        state.entregaInfo[id].quemRecebeu = el.value;
+      };
+      el.onblur = function () { salvarQuemRecebeu(id, el.value); };
+    });
+    var alternarLoteBtn = app.querySelector('[data-action="alternar-individual-lote"]');
+    if (alternarLoteBtn && state.loteFoto) {
+      var loteRua = state.loteFoto.ruaNome, loteNum = state.loteFoto.numero;
+      alternarLoteBtn.onclick = function () {
+        alternarEnderecoIndividual(alternarLoteBtn.getAttribute("data-chave"), loteRua, loteNum);
+      };
     }
     var cancelarBtn = app.querySelector('[data-action="cancelar-lote"]');
     if (cancelarBtn) cancelarBtn.onclick = cancelarLoteFoto;
@@ -2009,6 +2099,7 @@
             var qv = (state.entregaInfo[itensDoEndereco[qi].id] && state.entregaInfo[itensDoEndereco[qi].id].quemRecebeu) || "";
             if (qv) { quemRecebeuEndereco = qv; break; }
           }
+          var lojaPorLoja = qtdMesmoNumero > 1 && enderecoEhIndividual(chaveEndereco, itensDoEndereco);
           html += '<li id="endereco-' + chaveEndereco + '" style="padding:7px 12px;background:var(--paper-deep);border-top:1px solid var(--line);list-style:none;display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
             '<span style="flex:1"><span style="font-size:16px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
             (qtdMesmoNumero > 1 ? '<span style="font-size:14px;font-weight:700;color:var(--accent-deep)"> \u00b7 ' + qtdMesmoNumero + " pacotes</span>" : "") + "</span>" +
@@ -2018,10 +2109,20 @@
                 '<button data-action="apagar-fachada" data-chave="' + chaveEndereco + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>'
               : '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (fachadaPendente ? " ativo-pendente" : "") + '">' +
                 (fachadaPendente ? "\u23f3" : "\u{1F4F7}") + " Fachada</button>") +
-            '<input data-action="quem-recebeu-endereco" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" value="' + esc(quemRecebeuEndereco) + '" placeholder="Quem recebeu ' + (qtdMesmoNumero === 1 ? "esse pacote" : "esses " + qtdMesmoNumero + " pacotes") + ' (ex: porteiro)" style="flex:1 1 100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />' +
+            (qtdMesmoNumero > 1
+              ? '<button data-action="alternar-individual" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (lojaPorLoja ? " ativo-entregue" : "") + '">' +
+                (lojaPorLoja ? "\ud83c\udfea Loja por loja" : "\ud83c\udfe2 Um nome pra todos") + "</button>"
+              : "") +
+            // Shopping: cada loja tem quem assina; o campo do endereço sai de
+            // cena e cada pacote ganha o seu, logo abaixo do nome dele.
+            (lojaPorLoja
+              ? '<p style="flex:1 1 100%;font-size:11px;margin:2px 0 0;opacity:.6">cada pacote desse número tem o seu campo de quem recebeu, embaixo do nome</p>'
+              : '<input data-action="quem-recebeu-endereco" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" value="' + esc(quemRecebeuEndereco) + '" placeholder="Quem recebeu ' + (qtdMesmoNumero === 1 ? "esse pacote" : "esses " + qtdMesmoNumero + " pacotes") + ' (ex: porteiro)" style="flex:1 1 100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />') +
             "</li>";
         }
 
+        var itensDesteNumero = g.itens.filter(function (it) { return it.numero === item.numero; });
+        var lojaPorLojaAtual = qtdMesmoNumero > 1 && enderecoEhIndividual(chaveEndereco, itensDesteNumero);
         var qtdFotosPacote = fotosDoPacote(item.id).length;
         var jaTemFoto = qtdFotosPacote > 0;
         var fotoPacotePendente = !jaTemFoto && pacotePendenteFila(item.id);
@@ -2046,7 +2147,14 @@
           '<span' + (st.separado ? ' class="nome-separado"' : "") + ">" + (qtdMesmoNumero > 1 ? esc(item.nome || "sem nome") : "n\u00ba " + esc(item.numero) + (item.nome ? " \u00b7 " + esc(item.nome) : "")) + "</span></div>" +
           '<div style="display:flex;gap:6px;flex-wrap:wrap">' +
           botaoFoto +
-          "</div></li>";
+          "</div>" +
+          // Modo "loja por loja": o nome de quem recebeu é desta loja, não do
+          // número inteiro — por isso o campo fica aqui, colado no nome do
+          // pacote, e grava só nele.
+          (lojaPorLojaAtual
+            ? '<input data-action="quem-recebeu" data-id="' + item.id + '" value="' + esc((state.entregaInfo[item.id] && state.entregaInfo[item.id].quemRecebeu) || "") + '" placeholder="Quem recebeu ' + (item.nome ? "em " + esc(cortarNome(String(item.nome).trim(), 18)) : "esse pacote") + '" style="width:100%;box-sizing:border-box;margin-top:8px;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />'
+            : "") +
+          "</li>";
       });
       html += "</ul></div>";
     });
@@ -2267,6 +2375,11 @@
         state.entregaInfo[id].quemRecebeu = el.value;
       };
       el.onblur = function () { salvarQuemRecebeu(id, el.value); };
+    });
+    app.querySelectorAll('[data-action="alternar-individual"]').forEach(function (el) {
+      el.onclick = function () {
+        alternarEnderecoIndividual(el.getAttribute("data-chave"), el.getAttribute("data-rua"), el.getAttribute("data-numero"));
+      };
     });
     app.querySelectorAll('[data-action="quem-recebeu-endereco"]').forEach(function (el) {
       var ruaNome = el.getAttribute("data-rua");
