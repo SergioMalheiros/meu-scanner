@@ -233,7 +233,12 @@
   function removerDaFilaPorIdentidade(item) {
     state.filaPendente = state.filaPendente.filter(function (p) {
       if (p.tipo !== item.tipo) return true;
-      return item.tipo === "pacote" ? p.linhaId !== item.linhaId : p.chave !== item.chave;
+      // Pacote agora pode ter mais de uma foto (mais de 1 "slot") — a
+      // identidade pra descartar uma tentativa antiga da fila tem que
+      // considerar o slot também, senão a foto extra (slot 1) que falhou
+      // apagaria da fila a foto principal (slot 0) que também tava esperando
+      // reenvio, perdendo ela pra sempre.
+      return item.tipo === "pacote" ? (p.linhaId !== item.linhaId || p.slotIdx !== item.slotIdx) : p.chave !== item.chave;
     });
   }
   function pacotePendenteFila(linhaId) {
@@ -243,13 +248,33 @@
     return state.filaPendente.some(function (p) { return p.tipo === "fachada" && p.chave === chave; });
   }
 
+  // Um pacote pode ter mais de 1 foto agora (ex: loja específica dentro de um
+  // shopping, além da foto do próprio pacote) — fica guardado como um mapa
+  // "slot -> url" (slot 0, 1, 2...) tanto localmente quanto no Firebase, pra
+  // cada foto poder ser enviada de forma independente sem uma sobrescrever a
+  // outra. Esses dois helpers escondem esse detalhe do resto do código.
+  function fotosDoPacote(linhaId) {
+    var info = state.entregaInfo[linhaId];
+    if (!info || !info.fotos) return [];
+    return Object.keys(info.fotos).sort(function (a, b) { return (+a) - (+b); }).map(function (k) { return info.fotos[k]; });
+  }
+  function temFotoPacote(linhaId) {
+    return fotosDoPacote(linhaId).length > 0;
+  }
+
   function gravarFotoNoFirebase(item, url) {
     if (item.tipo === "pacote") {
       var quemRecebeu = (state.entregaInfo[item.linhaId] && state.entregaInfo[item.linhaId].quemRecebeu) || item.quemRecebeuSnapshot || "";
-      fbDb.ref("lotes/" + item.chaveRota + "/entregas/" + item.data + "/" + item.codigo).set({
+      // "fotos/<slot>" como chave do update() grava só essa foto específica,
+      // sem mexer nas outras fotos desse mesmo pacote — importante porque
+      // pacotes com mais de 1 foto (pacote + fachada da loja, por exemplo)
+      // enviam cada foto de forma independente, às vezes ao mesmo tempo.
+      var campos = {
         rua: item.rua, numero: item.numero, nome: item.nome || "", quemRecebeu: quemRecebeu,
-        fotoPacoteUrl: url, chave: item.chave, ts: Date.now()
-      });
+        chave: item.chave, ts: Date.now()
+      };
+      campos["fotos/" + item.slotIdx] = url;
+      fbDb.ref("lotes/" + item.chaveRota + "/entregas/" + item.data + "/" + item.codigo).update(campos);
     } else if (item.tipo === "fachada") {
       // Sem data no caminho de propósito: a fachada de um prédio não muda de
       // um dia pro outro, então fica registrada pra sempre (por rota +
@@ -323,9 +348,9 @@
   // apagar primeiro (função separada), só então o ícone volta a abrir a
   // câmera pra uma foto nova.
   function verFotoPacote(linhaId) {
-    var info = state.entregaInfo[linhaId];
-    if (!info || !info.fotoPacoteUrl) return;
-    state.fotoVisualizando = { tipo: "pacote", linhaId: linhaId, url: info.fotoPacoteUrl };
+    var urls = fotosDoPacote(linhaId);
+    if (!urls.length) return;
+    state.fotoVisualizando = { tipo: "pacote", linhaId: linhaId, urls: urls };
     render();
   }
 
@@ -334,7 +359,7 @@
   function verFotoFachada(chave) {
     var url = state.fachadaInfo[chave];
     if (!url) return;
-    state.fotoVisualizando = { tipo: "fachada", chave: chave, url: url };
+    state.fotoVisualizando = { tipo: "fachada", chave: chave, urls: [url] };
     render();
   }
 
@@ -346,11 +371,16 @@
   function apagarFotoPacote(linhaId) {
     var linha = state.linhasParseadas && state.linhasParseadas.find(function (l) { return l.id === linhaId; });
     if (!linha) return;
-    if (!confirm("Apagar essa foto? Depois dá pra tirar uma nova.")) return;
-    if (state.entregaInfo[linhaId]) state.entregaInfo[linhaId].fotoPacoteUrl = "";
+    var n = fotosDoPacote(linhaId).length;
+    // Apaga todas as fotos desse pacote de uma vez (não uma por vez) — mais
+    // simples de explicar e evita ficar com um "resto" de foto antiga de um
+    // slot que ninguém foi conferir. Pra um pacote com 2 fotos (ex: loja
+    // específica), é tirar as 2 de novo, rapidinho.
+    if (!confirm(n > 1 ? "Apagar essas " + n + " fotos desse pacote? Depois dá pra tirar novas." : "Apagar essa foto? Depois dá pra tirar uma nova.")) return;
+    if (state.entregaInfo[linhaId]) state.entregaInfo[linhaId].fotos = {};
     if (fbDb && state.minhaRota && linha.codigo) {
       var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-      fbDb.ref("lotes/" + chaveRota + "/entregas/" + dataDeHoje() + "/" + linha.codigo + "/fotoPacoteUrl").remove();
+      fbDb.ref("lotes/" + chaveRota + "/entregas/" + dataDeHoje() + "/" + linha.codigo + "/fotos").remove();
     }
     render();
   }
@@ -419,8 +449,7 @@
       // tem foto — igual ao "Todas" — só entra aqui quem ainda não tem foto
       // (senão ia obrigar a refazer todo mundo de novo).
       if (itensDoNumero.length === 1) return true;
-      var tem = !!(state.entregaInfo[l.id] && state.entregaInfo[l.id].fotoPacoteUrl);
-      return !tem;
+      return !temFotoPacote(l.id);
     });
     if (!itens.length) return;
     definirFoco("endereco-" + chaveOrdenavel(ruaNome, numero));
@@ -469,7 +498,27 @@
     });
   }
 
-  function tirarFotoLote(tentativas) {
+  // Cada pacote pode levar mais de 1 foto (ex: pacote + fachada da loja
+  // específica dentro de um shopping) — em vez de amarrar foto->pacote pela
+  // posição na lista (1ª foto = 1º pacote, 2ª foto = 2º pacote, sempre),
+  // cada foto guarda de propósito QUAL pacote ela é (itemIdx). Esses dois
+  // helpers calculam, a partir das fotos já tiradas: qual é o PRÓXIMO
+  // pacote ainda sem nenhuma foto (pro botão principal), e qual foi o
+  // ÚLTIMO pacote fotografado (pro botão de "foto extra pra esse mesmo").
+  function proximoItemIdxLote(lote) {
+    if (!lote.itens.length) return null;
+    var maiorUsado = -1;
+    lote.fotos.forEach(function (f) { if (f.itemIdx > maiorUsado) maiorUsado = f.itemIdx; });
+    var prox = maiorUsado + 1;
+    return prox < lote.itens.length ? prox : null;
+  }
+  function ultimoItemIdxLote(lote) {
+    var maiorUsado = -1;
+    lote.fotos.forEach(function (f) { if (f.itemIdx > maiorUsado) maiorUsado = f.itemIdx; });
+    return maiorUsado >= 0 ? maiorUsado : null;
+  }
+
+  function tirarFotoLote(modo, tentativas) {
     if (!state.loteFoto || state.loteFoto.statusCamera !== "ativa") return;
     var video = document.getElementById("videoLote");
     if (!video || !video.videoWidth) {
@@ -478,10 +527,27 @@
       // acesso, mas o vídeo ainda tá "carregando") — daí o primeiro toque não
       // fazia nada, e só o segundo (quando o frame já tinha chegado)
       // funcionava. Em vez de simplesmente ignorar o toque, tenta de novo
-      // sozinho por até meio segundo antes de desistir.
+      // sozinho antes de desistir. Como agora dá pra tirar várias fotos numa
+      // sequência rápida no mesmo endereço (pacote + loja específica, por
+      // exemplo), a tela de baixo é recriada com mais frequência do que
+      // antes — dando mais tempo aqui (uns 3s) evita que um toque rápido
+      // demais em sequência pareça "não fez nada".
       tentativas = (typeof tentativas === "number" ? tentativas : 0) + 1;
-      if (tentativas <= 10) setTimeout(function () { tirarFotoLote(tentativas); }, 50);
+      if (tentativas <= 60) setTimeout(function () { tirarFotoLote(modo, tentativas); }, 50);
       return;
+    }
+    var lote = state.loteFoto;
+    var itemIdx = 0;
+    if (lote.tipo !== "fachada") {
+      if (modo === "extra") {
+        var ultimo = ultimoItemIdxLote(lote);
+        itemIdx = ultimo === null ? proximoItemIdxLote(lote) : ultimo;
+      } else {
+        var prox = proximoItemIdxLote(lote);
+        if (prox === null) return; // todos os pacotes já têm pelo menos 1 foto — só resta "foto extra"
+        itemIdx = prox;
+      }
+      if (itemIdx === null) return;
     }
     var maxLado = 1000;
     var w = video.videoWidth, h = video.videoHeight;
@@ -492,7 +558,7 @@
     canvas.getContext("2d").drawImage(video, 0, 0, w, h);
     canvas.toBlob(function (blob) {
       if (!blob || !state.loteFoto) return;
-      state.loteFoto.fotos.push({ blob: blob, previewUrl: URL.createObjectURL(blob) });
+      state.loteFoto.fotos.push({ blob: blob, previewUrl: URL.createObjectURL(blob), itemIdx: itemIdx });
       render();
     }, "image/jpeg", 0.7);
   }
@@ -536,14 +602,6 @@
       return;
     }
 
-    if (lote.fotos.length > lote.itens.length) {
-      var okExtra = confirm(
-        "Você tirou " + lote.fotos.length + " fotos, mas só há " + lote.itens.length + " " +
-        plural(lote.itens.length, "pacote pendente", "pacotes pendentes") + " nesse endereço.\n" +
-        "As últimas " + (lote.fotos.length - lote.itens.length) + " não serão enviadas. Continuar?"
-      );
-      if (!okExtra) return;
-    }
     pararCameraLote();
     state.loteFoto = null;
     render();
@@ -551,21 +609,24 @@
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
     var data = dataDeHoje();
     var chave = chaveOrdenavel(lote.ruaNome, lote.numero);
-    var n = Math.min(lote.fotos.length, lote.itens.length);
-    for (var i = 0; i < n; i++) {
-      var linha = lote.itens[i];
-      var item = {
-        tipo: "pacote",
-        pasta: "fotos/" + chaveRota + "/" + data + "/" + chave,
-        nomeArquivo: "pacote_" + linha.codigo + "_" + Date.now() + "_" + i,
-        linhaId: linha.id, chaveRota: chaveRota, data: data, codigo: linha.codigo,
-        rua: linha.rua, numero: linha.numero, nome: linha.nome || "", chave: chave,
-        quemRecebeuSnapshot: (state.entregaInfo[linha.id] && state.entregaInfo[linha.id].quemRecebeu) || ""
-      };
-      processarEnvioFoto(item, lote.fotos[i].blob);
-      URL.revokeObjectURL(lote.fotos[i].previewUrl);
-    }
-    for (var j = n; j < lote.fotos.length; j++) URL.revokeObjectURL(lote.fotos[j].previewUrl);
+    // Cada foto já sabe de qual pacote ela é (itemIdx) — não tem mais limite
+    // de "1 foto por pacote": um endereço com lojas específicas (shopping)
+    // pode ter 2+ fotos por pacote, cada uma vira um "slot" independente.
+    lote.itens.forEach(function (linha, idx) {
+      var fotosDoItem = lote.fotos.filter(function (f) { return f.itemIdx === idx; });
+      fotosDoItem.forEach(function (f, slotIdx) {
+        var item = {
+          tipo: "pacote",
+          pasta: "fotos/" + chaveRota + "/" + data + "/" + chave,
+          nomeArquivo: "pacote_" + linha.codigo + "_" + Date.now() + "_" + idx + "_" + slotIdx,
+          linhaId: linha.id, chaveRota: chaveRota, data: data, codigo: linha.codigo,
+          rua: linha.rua, numero: linha.numero, nome: linha.nome || "", chave: chave, slotIdx: slotIdx,
+          quemRecebeuSnapshot: (state.entregaInfo[linha.id] && state.entregaInfo[linha.id].quemRecebeu) || ""
+        };
+        processarEnvioFoto(item, f.blob);
+      });
+    });
+    lote.fotos.forEach(function (f) { URL.revokeObjectURL(f.previewUrl); });
   }
 
   function salvarQuemRecebeu(linhaId, valor) {
@@ -1019,7 +1080,11 @@
         var item = dados[codigo];
         var linha = state.linhasParseadas && state.linhasParseadas.find(function (l) { return l.codigo === codigo; });
         if (!linha) return;
-        novo[linha.id] = { quemRecebeu: item.quemRecebeu || "", fotoPacoteUrl: item.fotoPacoteUrl || "" };
+        // Compatibilidade com fotos tiradas antes dessa atualização (campo
+        // antigo "fotoPacoteUrl", uma foto só) — trata como se fosse a foto
+        // do slot 0, assim nada some pra quem já tinha tirado foto hoje.
+        var fotos = item.fotos || (item.fotoPacoteUrl ? { "0": item.fotoPacoteUrl } : {});
+        novo[linha.id] = { quemRecebeu: item.quemRecebeu || "", fotos: fotos };
       });
       state.entregaInfo = novo;
       render();
@@ -1266,9 +1331,18 @@
         var it = entregas[codigo];
         if (!it.chave) return;
         if (!porChave[it.chave]) porChave[it.chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null, quemRecebeu: "" };
+        // Um pacote pode ter mais de uma foto agora (ex: loja específica
+        // dentro de um shopping) — cada uma vira um arquivo no zip. O "|| []"
+        // com fallback pro campo antigo "fotoPacoteUrl" é só compatibilidade
+        // com fotos tiradas antes dessa atualização.
+        var urlsDoPacote = it.fotos
+          ? Object.keys(it.fotos).sort(function (a, b) { return (+a) - (+b); }).map(function (k) { return it.fotos[k]; })
+          : (it.fotoPacoteUrl ? [it.fotoPacoteUrl] : []);
         // Prioriza quem realmente recebeu (ex: porteiro) sobre o nome do
         // destinatário da lista colada — é o que sai na foto agora.
-        porChave[it.chave].pacotes.push({ nome: it.quemRecebeu || it.nome || "pacote", codigo: codigo, url: it.fotoPacoteUrl });
+        urlsDoPacote.forEach(function (url, slot) {
+          porChave[it.chave].pacotes.push({ nome: it.quemRecebeu || it.nome || "pacote", codigo: codigo, url: url, slot: slot });
+        });
         // Guarda também no nível do endereço, pra ir no nome da pasta do zip.
         if (!porChave[it.chave].quemRecebeu && it.quemRecebeu) porChave[it.chave].quemRecebeu = it.quemRecebeu;
       });
@@ -1315,8 +1389,10 @@
           // Sempre inclui o código junto do nome: como agora vários pacotes do
           // mesmo endereço podem ficar com o mesmo "quem recebeu" (ex: vários
           // "Porteiro" na mesma pasta), o código garante que nenhum arquivo
-          // sobrescreva o outro dentro do zip.
-          var nomeArq = sanitizarChaveFirebase(p.nome).replace(/\s+/g, "-") + "_" + p.codigo + ".jpg";
+          // sobrescreva o outro dentro do zip. Quando o próprio pacote tem
+          // mais de 1 foto, a 2ª em diante ganha "_2", "_3"... no nome (a 1ª
+          // fica sem sufixo, igual sempre foi).
+          var nomeArq = sanitizarChaveFirebase(p.nome).replace(/\s+/g, "-") + "_" + p.codigo + (p.slot > 0 ? "_" + (p.slot + 1) : "") + ".jpg";
           itensParaBuscar.push({ nomePasta: nomePasta, nomeArquivo: nomeArq, url: p.url });
         });
       });
@@ -1572,11 +1648,18 @@
   // baixo.
   function renderVisualizadorFoto() {
     if (!state.fotoVisualizando) return "";
+    var urls = state.fotoVisualizando.urls || [];
+    // Pacote com mais de 1 foto (ex: pacote + fachada da loja específica)
+    // mostra as duas empilhadas, com rolagem se precisar — "Apagar" some
+    // com todas de uma vez (ver comentário em apagarFotoPacote).
+    var imgs = urls.map(function (u) {
+      return '<img src="' + u + '" style="max-width:100%;max-height:' + (urls.length > 1 ? "38vh" : "70vh") + ';border-radius:8px;object-fit:contain" />';
+    }).join("");
     return '<div style="position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:1000;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;gap:14px">' +
-      '<img src="' + state.fotoVisualizando.url + '" style="max-width:100%;max-height:70vh;border-radius:8px;object-fit:contain" />' +
+      '<div style="display:flex;flex-direction:column;gap:10px;max-height:78vh;overflow-y:auto;align-items:center">' + imgs + '</div>' +
       '<div style="display:flex;gap:10px">' +
       '<button data-action="fechar-foto-visualizando" class="pill" style="background:#fff;color:#000">Fechar</button>' +
-      '<button data-action="apagar-foto-visualizando" class="pill" style="background:var(--alert);color:#fff">\u{1F5D1}️ Apagar foto</button>' +
+      '<button data-action="apagar-foto-visualizando" class="pill" style="background:var(--alert);color:#fff">\u{1F5D1}️ Apagar ' + (urls.length > 1 ? "as " + urls.length + " fotos" : "foto") + '</button>' +
       "</div></div>";
   }
 
@@ -1665,9 +1748,12 @@
       var qv = (state.entregaInfo[lote.itens[qi].id] && state.entregaInfo[lote.itens[qi].id].quemRecebeu) || "";
       if (qv) { quemRecebeuLote = qv; break; }
     }
+    var itensComFoto = ehFachada ? 0 : lote.itens.filter(function (_, idx) {
+      return lote.fotos.some(function (f) { return f.itemIdx === idx; });
+    }).length;
     var infoLinha = ehFachada
       ? (lote.fotos.length > 0 ? "foto pronta pra enviar" : "tire 1 foto da fachada do prédio")
-      : (lote.fotos.length + ' ' + plural(lote.fotos.length, "foto tirada", "fotos tiradas") + ' · ' + lote.itens.length + ' ' + plural(lote.itens.length, "pacote pendente", "pacotes pendentes"));
+      : (itensComFoto + '/' + lote.itens.length + ' pacotes com foto · ' + lote.fotos.length + ' ' + plural(lote.fotos.length, "foto tirada", "fotos tiradas"));
     var html = '<div style="padding:24px 0">';
     html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:8px">' +
       '<div><p style="font-weight:700;font-size:15px;margin:0">' + esc(lote.ruaNome) + ' · nº ' + esc(lote.numero) + (ehFachada ? " · fachada" : "") + '</p>' +
@@ -1693,21 +1779,39 @@
 
     html += '<video id="videoLote" playsinline autoplay muted style="display:' + (lote.statusCamera === "ativa" ? "block" : "none") + '"></video>';
 
-    if (lote.statusCamera === "ativa" && (!ehFachada || lote.fotos.length === 0)) {
-      // Fachada é só 1 foto — depois de tirada, o obturador some (pra ver de
-      // novo é só apagar a miniatura, que ele volta).
-      html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:16px">📸 ' +
-        (ehFachada ? "Tirar foto da fachada" : "Tirar foto (" + (lote.fotos.length + 1) + "ª)") + '</button>';
+    if (lote.statusCamera === "ativa") {
+      if (ehFachada) {
+        // Fachada é só 1 foto — depois de tirada, o obturador some (pra ver
+        // de novo é só apagar a miniatura, que ele volta).
+        if (lote.fotos.length === 0) {
+          html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:16px">📸 Tirar foto da fachada</button>';
+        }
+      } else {
+        var proxIdx = proximoItemIdxLote(lote);
+        var ultimoIdx = ultimoItemIdxLote(lote);
+        if (proxIdx !== null) {
+          html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:16px">📸 Foto do pacote ' + (proxIdx + 1) + ' de ' + lote.itens.length + '</button>';
+        }
+        // Sem limite de 1 foto por pacote: pra endereço com loja específica
+        // (ex: dentro de um shopping), esse botão tira mais uma foto do
+        // MESMO pacote anterior (a fachada daquela loja, por exemplo) em vez
+        // de avançar pro próximo — sempre visível assim que já existe pelo
+        // menos 1 foto de algum pacote.
+        if (ultimoIdx !== null) {
+          html += '<button data-action="tirar-foto-extra-lote" class="btn-primary" style="margin-top:8px;font-size:13px;padding:10px 16px;background:transparent;border:1px dashed var(--line);color:var(--ink)">📸 + foto extra do pacote ' + (ultimoIdx + 1) + ' <span style="opacity:.7">(loja específica, outro ângulo...)</span></button>';
+        }
+      }
     }
 
     if (lote.fotos.length > 0) {
       html += '<div style="display:flex;gap:8px;overflow-x:auto;padding:14px 0">';
       lote.fotos.forEach(function (f, idx) {
-        var pacoteDaFoto = lote.itens[idx];
+        var pacoteDaFoto = ehFachada ? null : lote.itens[f.itemIdx];
+        var ehExtra = !ehFachada && lote.fotos.slice(0, idx).some(function (x) { return x.itemIdx === f.itemIdx; });
         // Só a posição (nº do pedido/pacote), nunca o nome de quem é o
         // destinatário — na entrega isso não é conferido, e ia confundir
         // (o nome que representa esse lote todo é o do campo acima).
-        var legenda = ehFachada ? "fachada" : (pacoteDaFoto ? ((idx + 1) + "ª · cód. " + pacoteDaFoto.codigo.slice(-6)) : "extra");
+        var legenda = ehFachada ? "fachada" : (pacoteDaFoto ? ("pacote " + (f.itemIdx + 1) + (ehExtra ? " extra" : "") + " · " + pacoteDaFoto.codigo.slice(-6)) : "extra");
         html += '<div style="position:relative;flex-shrink:0;text-align:center">' +
           '<img src="' + f.previewUrl + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block" />' +
           '<button data-action="remover-foto-lote" data-idx="' + idx + '" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:var(--alert);color:#fff;border:none;font-size:12px;line-height:1;cursor:pointer">✕</button>' +
@@ -1735,7 +1839,9 @@
     var reativarBtn = app.querySelector('[data-action="reativar-camera-lote"]');
     if (reativarBtn) reativarBtn.onclick = iniciarCameraLote;
     var tirarBtn = app.querySelector('[data-action="tirar-foto-lote"]');
-    if (tirarBtn) tirarBtn.onclick = function () { tirarFotoLote(); };
+    if (tirarBtn) tirarBtn.onclick = function () { tirarFotoLote("novo"); };
+    var tirarExtraBtn = app.querySelector('[data-action="tirar-foto-extra-lote"]');
+    if (tirarExtraBtn) tirarExtraBtn.onclick = function () { tirarFotoLote("extra"); };
     var enviarBtn = app.querySelector('[data-action="enviar-lote"]');
     if (enviarBtn) enviarBtn.onclick = enviarLoteFoto;
     app.querySelectorAll('[data-action="remover-foto-lote"]').forEach(function (el) {
@@ -1823,8 +1929,7 @@
         if (primeiroDoNumero) {
           var itensDoEndereco = g.itens.filter(function (it) { return it.numero === item.numero; });
           var semFotoNoEndereco = itensDoEndereco.filter(function (it) {
-            var tem = !!(state.entregaInfo[it.id] && state.entregaInfo[it.id].fotoPacoteUrl);
-            return !tem && !pacotePendenteFila(it.id);
+            return !temFotoPacote(it.id) && !pacotePendenteFila(it.id);
           }).length;
           var quemRecebeuEndereco = "";
           for (var qi = 0; qi < itensDoEndereco.length; qi++) {
@@ -1844,8 +1949,9 @@
             "</li>";
         }
 
-        var temFotoPacote = !!(state.entregaInfo[item.id] && state.entregaInfo[item.id].fotoPacoteUrl);
-        var fotoPacotePendente = !temFotoPacote && pacotePendenteFila(item.id);
+        var qtdFotosPacote = fotosDoPacote(item.id).length;
+        var jaTemFoto = qtdFotosPacote > 0;
+        var fotoPacotePendente = !jaTemFoto && pacotePendenteFila(item.id);
         var recuo = qtdMesmoNumero > 1 ? "8px 12px 8px 26px" : "8px 12px";
         // Uma vez com foto confirmada, o \u00edcone vira "ver a foto" em vez de
         // reabrir a c\u00e2mera \u2014 pra retirar, usa o bot\u00e3o de apagar ao lado (ou
@@ -1854,8 +1960,8 @@
         // vivo do "Todas" (j\u00e1 pede quem recebeu) \u2014 n\u00e3o tem mais c\u00e2mera
         // nativa aqui, com endere\u00e7o de 1 ou v\u00e1rios pacotes.
         var botaoFoto;
-        if (temFotoPacote) {
-          botaoFoto = '<button data-action="ver-foto-pacote" data-id="' + item.id + '" class="pill ativo-entregue">\u2713 Foto</button>' +
+        if (jaTemFoto) {
+          botaoFoto = '<button data-action="ver-foto-pacote" data-id="' + item.id + '" class="pill ativo-entregue">\u2713 Foto' + (qtdFotosPacote > 1 ? " (" + qtdFotosPacote + ")" : "") + '</button>' +
             '<button data-action="apagar-foto-pacote" data-id="' + item.id + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>';
         } else {
           botaoFoto = '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
