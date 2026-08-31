@@ -433,14 +433,12 @@
 
   function abrirLoteFoto(ruaNome, numero) {
     if (!state.linhasParseadas) return;
-    // Compara pelo nome CANÔNICO da rua (o mesmo que agrupa a lista na tela),
-    // não pelo texto cru colado — assim "R. Mariz e Barros" bate certinho com
-    // o grupo "Rua Mariz e Barros" mesmo que o texto original seja abreviado.
-    var itensDoNumero = state.linhasParseadas.filter(function (l) {
-      if (l.erro || !l.codigo || String(l.numero) !== String(numero)) return false;
-      var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
-      return !!ruaMatch && ruaMatch.nome === ruaNome;
-    });
+    // Mesma regra que monta as caixas na tela (linhasDoEndereco): compara
+    // pelo nome CANÔNICO quando a rua está cadastrada nas Faixas e pelo nome
+    // cru quando ela ainda NÃO está (caixa cinza). Antes só considerava rua
+    // cadastrada — resultado: em rua sem faixa, tocar em "Foto" não fazia
+    // absolutamente nada, e não dava pra registrar a entrega daquele pacote.
+    var itensDoNumero = linhasDoEndereco(ruaNome, numero).filter(function (l) { return !!l.codigo; });
     var itens = itensDoNumero.filter(function (l) {
       if (pacotePendenteFila(l.id)) return false;
       // Endereço com só 1 pacote: precisa poder reabrir mesmo se já tiver
@@ -505,17 +503,37 @@
   // helpers calculam, a partir das fotos já tiradas: qual é o PRÓXIMO
   // pacote ainda sem nenhuma foto (pro botão principal), e qual foi o
   // ÚLTIMO pacote fotografado (pro botão de "foto extra pra esse mesmo").
+  // Próximo = o primeiro nome que ainda NÃO tem nenhuma foto (e não
+  // "o de depois do último"): se alguém apagar a miniatura de um pacote do
+  // meio, o botão precisa voltar a oferecer justamente aquele, senão o
+  // pacote ficaria sem foto e sem jeito de refazer sem sair da câmera.
   function proximoItemIdxLote(lote) {
-    if (!lote.itens.length) return null;
-    var maiorUsado = -1;
-    lote.fotos.forEach(function (f) { if (f.itemIdx > maiorUsado) maiorUsado = f.itemIdx; });
-    var prox = maiorUsado + 1;
-    return prox < lote.itens.length ? prox : null;
+    for (var i = 0; i < lote.itens.length; i++) {
+      var temFoto = lote.fotos.some(function (f) { return f.itemIdx === i; });
+      if (!temFoto) return i;
+    }
+    return null;
   }
+  // Último = o dono da ÚLTIMA foto tirada (a ordem em que foram tiradas), que
+  // é a pessoa que você acabou de fotografar — é a ela que a foto da frente
+  // da loja pertence.
   function ultimoItemIdxLote(lote) {
-    var maiorUsado = -1;
-    lote.fotos.forEach(function (f) { if (f.itemIdx > maiorUsado) maiorUsado = f.itemIdx; });
-    return maiorUsado >= 0 ? maiorUsado : null;
+    if (!lote.fotos.length) return null;
+    return lote.fotos[lote.fotos.length - 1].itemIdx;
+  }
+  // Em endereço com loja (shopping), o NOME de cada pacote é a loja pra onde
+  // ele vai — é ele que diz em qual porta você tem que estar. Por isso a
+  // câmera passou a mostrar o nome em cada botão/miniatura (antes mostrava só
+  // "pacote 1, pacote 2", que não ajudava a saber de quem era).
+  function nomeItemLote(linha, idx) {
+    var n = linha && linha.nome ? String(linha.nome).trim() : "";
+    return n || "pacote " + (idx + 1);
+  }
+  function cortarNome(n, max) {
+    return n.length > max ? n.slice(0, max - 1) + "\u2026" : n;
+  }
+  function fotosDoItemLote(lote, idx) {
+    return lote.fotos.filter(function (f) { return f.itemIdx === idx; }).length;
   }
 
   function tirarFotoLote(modo, tentativas) {
@@ -740,6 +758,29 @@
     var corSimples = par ? cores.par1 : cores.impar1;
     return { label: par ? "PAR" : "\u00cdMPAR", cor: corSimples };
   }
+  // "R." e "Rua", "Av." e "Avenida"... a lista que sai do sistema nem sempre
+  // escreve a rua igual ao que foi cadastrado nas Faixas. Aqui a gente separa
+  // o TIPO (rua/avenida/travessa) do NÚCLEO do nome pra poder comparar só o
+  // núcleo — mas sem misturar "Rua X" com "Travessa X", que são endereços
+  // diferentes de verdade.
+  var TIPOS_RUA = {
+    r: "rua", rua: "rua",
+    av: "avenida", avn: "avenida", avenida: "avenida",
+    tv: "travessa", trav: "travessa", travessa: "travessa",
+    al: "alameda", alameda: "alameda",
+    est: "estrada", estr: "estrada", estrada: "estrada",
+    pc: "praca", pca: "praca", praca: "praca",
+    rod: "rodovia", rodovia: "rodovia",
+    lgo: "largo", largo: "largo",
+    ld: "ladeira", ladeira: "ladeira",
+    bc: "beco", beco: "beco"
+  };
+  function partesRua(s) {
+    var t = normalizar(s).replace(/[.,;:'"()\/\\-]/g, " ").replace(/\s+/g, " ").trim();
+    var m = t.match(/^([a-z]+)\s+(.*)$/);
+    if (m && TIPOS_RUA[m[1]]) return { tipo: TIPOS_RUA[m[1]], nucleo: m[2].trim() };
+    return { tipo: null, nucleo: t };
+  }
   function encontrarRuaMapeada(ruaTexto, mapa) {
     var norm = normalizar(ruaTexto);
     var m = mapa.find(function (r) { return normalizar(r.nome) === norm; });
@@ -747,6 +788,16 @@
     m = mapa.find(function (r) { return normalizar(r.nome).length > 2 && norm.indexOf(normalizar(r.nome)) !== -1; });
     if (m) return m;
     m = mapa.find(function (r) { return norm.length > 2 && normalizar(r.nome).indexOf(norm) !== -1; });
+    if (m) return m;
+    // Última tentativa: mesmo núcleo de nome ("R. Ator Paulo Gustavo" bate com
+    // "Rua Ator Paulo Gustavo"), só quando os tipos não se contradizem.
+    var alvo = partesRua(ruaTexto);
+    if (!alvo.nucleo || alvo.nucleo.length < 3) return null;
+    m = mapa.find(function (r) {
+      var c = partesRua(r.nome);
+      if (c.tipo && alvo.tipo && c.tipo !== alvo.tipo) return false;
+      return c.nucleo === alvo.nucleo;
+    });
     return m || null;
   }
   function parseLinhas(texto) {
@@ -1789,18 +1840,41 @@
       } else {
         var proxIdx = proximoItemIdxLote(lote);
         var ultimoIdx = ultimoItemIdxLote(lote);
+        // Botão de cima = foto do PACOTE do próximo nome da lista. Ele fica
+        // sempre no mesmo lugar pra prédio comum continuar sendo "toca, toca,
+        // toca" (1 foto por pacote, sem toque a mais).
         if (proxIdx !== null) {
-          html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:16px">📸 Foto do pacote ' + (proxIdx + 1) + ' de ' + lote.itens.length + '</button>';
+          html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:15px 16px;text-align:left">📦 Foto do pacote \u00b7 ' +
+            esc(cortarNome(nomeItemLote(lote.itens[proxIdx], proxIdx), 26)) +
+            '<span style="display:block;font-size:11px;font-weight:400;opacity:.75;margin-top:3px">' + (proxIdx + 1) + ' de ' + lote.itens.length + ' desse número</span></button>';
         }
-        // Sem limite de 1 foto por pacote: pra endereço com loja específica
-        // (ex: dentro de um shopping), esse botão tira mais uma foto do
-        // MESMO pacote anterior (a fachada daquela loja, por exemplo) em vez
-        // de avançar pro próximo — sempre visível assim que já existe pelo
-        // menos 1 foto de algum pacote.
+        // Botão de baixo = a 2ª foto do MESMO nome que acabou de ser
+        // fotografado (a frente da loja dele, no caso de shopping). É o par
+        // que o Sérgio pediu: foto do pacote seguida da foto da loja, nome
+        // por nome. Só aparece depois que já existe a foto do pacote.
         if (ultimoIdx !== null) {
-          html += '<button data-action="tirar-foto-extra-lote" class="btn-primary" style="margin-top:8px;font-size:13px;padding:10px 16px;background:transparent;border:1px dashed var(--line);color:var(--ink)">📸 + foto extra do pacote ' + (ultimoIdx + 1) + ' <span style="opacity:.7">(loja específica, outro ângulo...)</span></button>';
+          var qtdUlt = fotosDoItemLote(lote, ultimoIdx);
+          var nomeUlt = esc(cortarNome(nomeItemLote(lote.itens[ultimoIdx], ultimoIdx), 26));
+          html += '<button data-action="tirar-foto-extra-lote" class="btn-primary" style="margin-top:8px;font-size:15px;padding:14px 16px;text-align:left;background:var(--accent-deep)">🏪 ' +
+            (qtdUlt === 1 ? 'Frente da loja \u00b7 ' : 'Mais uma foto \u00b7 ') + nomeUlt +
+            '<span style="display:block;font-size:11px;font-weight:400;opacity:.85;margin-top:3px">' +
+            (qtdUlt === 1 ? 'mesma pessoa da foto anterior \u2014 fica com 2 fotos' : 'esse nome já está com ' + qtdUlt + ' fotos') +
+            '</span></button>';
         }
       }
+    }
+
+    // Conferência rápida por NOME: quem desse número já está com foto e
+    // quantas. Num shopping é isso que diz "a loja do Bruno já tá com as 2".
+    if (!ehFachada && lote.itens.length > 1) {
+      html += '<div style="margin-top:14px;border-top:1px solid var(--line);padding-top:10px">';
+      lote.itens.forEach(function (linha, idx) {
+        var n = fotosDoItemLote(lote, idx);
+        html += '<div style="display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:3px 0;opacity:' + (n ? "1" : ".5") + '">' +
+          '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + (idx + 1) + '. ' + esc(nomeItemLote(linha, idx)) + '</span>' +
+          '<span style="flex-shrink:0;font-weight:700;color:' + (n >= 2 ? "var(--ok)" : "var(--ink)") + '">' + (n ? "\ud83d\udcf7 " + n : "sem foto") + '</span></div>';
+      });
+      html += '</div>';
     }
 
     if (lote.fotos.length > 0) {
@@ -1808,10 +1882,9 @@
       lote.fotos.forEach(function (f, idx) {
         var pacoteDaFoto = ehFachada ? null : lote.itens[f.itemIdx];
         var ehExtra = !ehFachada && lote.fotos.slice(0, idx).some(function (x) { return x.itemIdx === f.itemIdx; });
-        // Só a posição (nº do pedido/pacote), nunca o nome de quem é o
-        // destinatário — na entrega isso não é conferido, e ia confundir
-        // (o nome que representa esse lote todo é o do campo acima).
-        var legenda = ehFachada ? "fachada" : (pacoteDaFoto ? ("pacote " + (f.itemIdx + 1) + (ehExtra ? " extra" : "") + " · " + pacoteDaFoto.codigo.slice(-6)) : "extra");
+        // Agora a legenda mostra o NOME (num shopping, o nome é a loja) e se
+        // aquela foto é a do pacote ou a da frente da loja.
+        var legenda = ehFachada ? "fachada" : (pacoteDaFoto ? (cortarNome(nomeItemLote(pacoteDaFoto, f.itemIdx), 14) + " · " + (ehExtra ? "loja" : "pacote")) : "extra");
         html += '<div style="position:relative;flex-shrink:0;text-align:center">' +
           '<img src="' + f.previewUrl + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block" />' +
           '<button data-action="remover-foto-lote" data-idx="' + idx + '" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:var(--alert);color:#fff;border:none;font-size:12px;line-height:1;cursor:pointer">✕</button>' +
