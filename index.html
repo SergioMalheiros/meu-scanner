@@ -325,7 +325,16 @@
   function verFotoPacote(linhaId) {
     var info = state.entregaInfo[linhaId];
     if (!info || !info.fotoPacoteUrl) return;
-    state.fotoVisualizando = { linhaId: linhaId, url: info.fotoPacoteUrl };
+    state.fotoVisualizando = { tipo: "pacote", linhaId: linhaId, url: info.fotoPacoteUrl };
+    render();
+  }
+
+  // Mesmo visualizador do "✓ Foto" do pacote, só que pra fachada — dá pra ver
+  // como a foto ficou antes de decidir se apaga pra tirar outra.
+  function verFotoFachada(chave) {
+    var url = state.fachadaInfo[chave];
+    if (!url) return;
+    state.fotoVisualizando = { tipo: "fachada", chave: chave, url: url };
     render();
   }
 
@@ -348,13 +357,10 @@
 
   function abrirFachadaFoto(ruaNome, numero) {
     if (!cloudinaryPronto || !fbDb || !state.minhaRota) return;
+    // Só chega aqui quando ainda NÃO tem fachada registrada (o botão vira
+    // "ver/apagar" assim que existe uma — ver verFotoFachada/apagarFachada),
+    // então pode abrir a câmera direto, sem precisar confirmar substituição.
     var chave = chaveOrdenavel(ruaNome, numero);
-    // Fachada agora é permanente (vale pra rota inteira, em qualquer dia) —
-    // se já tem uma registrada, confirma antes de substituir pra evitar
-    // apagar sem querer uma foto boa com um toque sem querer no botão.
-    if (state.fachadaInfo[chave] && !confirm("Essa fachada já está registrada (vale pra toda a rota, em qualquer dia). Quer tirar outra foto e substituir?")) {
-      return;
-    }
     // Mesma câmera ao vivo do "Todas"/"Foto" (sem input nativo) — só que sem
     // itens de pacote e sem pedir quem recebeu, já que fachada é só a foto
     // do prédio.
@@ -362,6 +368,19 @@
     state.loteFoto = { tipo: "fachada", ruaNome: ruaNome, numero: numero, itens: [], fotos: [], statusCamera: "pedindo", erro: "" };
     render();
     iniciarCameraLote();
+  }
+
+  // Apaga a fachada permanente (some da rota inteira, não só de hoje) — a
+  // pedido, no mesmo espírito do apagar de foto de pacote: precisa apagar
+  // primeiro pra o botão voltar a abrir a câmera pra uma foto nova.
+  function apagarFachada(chave) {
+    if (!confirm("Apagar essa foto de fachada? Ela vale pra rota inteira (não só hoje), então some pra todo mundo que usa esse código de rota. Depois dá pra tirar uma nova.")) return;
+    if (state.fachadaInfo[chave] !== undefined) delete state.fachadaInfo[chave];
+    if (fbDb && state.minhaRota) {
+      var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+      fbDb.ref("lotes/" + chaveRota + "/fachadas_permanentes/" + chave).remove();
+    }
+    render();
   }
 
   // ---------- câmera ao vivo por endereço (pacotes e fachada) ----------
@@ -1023,19 +1042,38 @@
       state.rotaConectada = true;
       var dados = snapshot.val() || {};
       if (!state.linhasParseadas) { render(); return; }
+      // Código repetido em mais de uma linha (ver aviso em calcularResultado)
+      // faz mais de um id de linha "torcer" pro mesmo código — antes isso
+      // guardava só o ÚLTIMO id de cada código, então uma confirmação da
+      // nuvem (inclusive a do próprio aparelho, voltando depois do envio)
+      // podia cair marcada numa encomenda ERRADA, sem ninguém ter escaneado
+      // ou clicado nela. Agora guarda TODAS as linhas daquele código.
       var porCodigo = {};
-      state.linhasParseadas.forEach(function (l) { if (!l.erro && l.codigo) porCodigo[l.codigo] = l.id; });
+      state.linhasParseadas.forEach(function (l) {
+        if (l.erro || !l.codigo) return;
+        if (!porCodigo[l.codigo]) porCodigo[l.codigo] = [];
+        porCodigo[l.codigo].push(l.id);
+      });
       var mudou = false;
       Object.keys(dados).forEach(function (codigo) {
-        var linhaId = porCodigo[codigo];
-        if (!linhaId) return;
+        var idsDoCodigo = porCodigo[codigo];
+        if (!idsDoCodigo || !idsDoCodigo.length) return;
         var remoto = dados[codigo] || {};
-        var local = state.pacoteStatus[linhaId] || { separado: false, entregue: false, devolvido: false };
         var novo = { separado: !!remoto.separado, entregue: !!remoto.entregue, devolvido: !!remoto.devolvido };
-        if (local.separado !== novo.separado || local.entregue !== novo.entregue || local.devolvido !== novo.devolvido) {
-          state.pacoteStatus[linhaId] = novo;
-          mudou = true;
-        }
+        // Código único (o caso normal): sempre foi só 1 id, comportamento
+        // idêntico ao de antes. Código repetido: se alguma das linhas já
+        // bate com o que a nuvem mandou, não mexe em nada (evita marcar uma
+        // encomenda de verdade sem ninguém ter tocado nela); só quando
+        // NENHUMA bate é que aplica numa linha ainda intocada, pra avançar
+        // sempre uma encomenda física diferente por vez — igual ao scanner.
+        var jaBate = idsDoCodigo.some(function (id) {
+          var st = state.pacoteStatus[id] || { separado: false, entregue: false, devolvido: false };
+          return st.separado === novo.separado && st.entregue === novo.entregue && st.devolvido === novo.devolvido;
+        });
+        if (jaBate) return;
+        var linhaId = idsDoCodigo.find(function (id) { return !state.pacoteStatus[id]; }) || idsDoCodigo[0];
+        state.pacoteStatus[linhaId] = novo;
+        mudou = true;
       });
       if (primeiraLeitura) {
         primeiraLeitura = false;
@@ -1364,7 +1402,21 @@
       return rc !== 0 ? rc : a.cor.localeCompare(b.cor);
     });
 
-    return { listaGrupos: listaGrupos, naoMapeadas: Object.keys(naoMapeadas), erros: erros };
+    // Código repetido em mais de uma linha (às vezes a própria lista vem
+    // assim, de erro no sistema de quem gerou a rota) é um jeito silencioso
+    // do contador "travar": ao escanear, o app sempre achava a PRIMEIRA linha
+    // com aquele código — se ela já tinha sido separada, escanear as outras
+    // encomendas com o mesmo código não fazia nada (nem esquenta, nem
+    // esfria), então o número parava de subir mesmo com pacotes de verdade
+    // ainda sendo separados. Ver processarCodigoLido pra a mudança que
+    // resolve o "travar" em si — isto aqui é só o aviso pra facilitar achar
+    // a causa quando for a lista.
+    var porCodigo = {};
+    validas.forEach(function (l) { if (l.codigo) (porCodigo[l.codigo] = porCodigo[l.codigo] || []).push(l); });
+    var duplicados = Object.keys(porCodigo).filter(function (c) { return porCodigo[c].length > 1; })
+      .map(function (c) { return { codigo: c, vezes: porCodigo[c].length }; });
+
+    return { listaGrupos: listaGrupos, naoMapeadas: Object.keys(naoMapeadas), erros: erros, duplicados: duplicados };
   }
 
   // ---------- câmera ----------
@@ -1450,8 +1502,18 @@
     ultimoCodigo = { codigo: codigo, ts: agora };
 
     if (!state.linhasParseadas) { state.resultadoScan = { encontrado: false, semLista: true, codigo: codigo }; render(); return; }
-    var linha = state.linhasParseadas.find(function (l) { return !l.erro && l.codigo && l.codigo === codigo; });
-    if (!linha) { state.resultadoScan = { encontrado: false, codigo: codigo }; render(); return; }
+    // Quando o mesmo código aparece em mais de uma linha (lista com código
+    // repetido — ver aviso em calcularResultado), escanear sempre pegava a
+    // PRIMEIRA linha daquele código. Se ela já tinha sido separada antes,
+    // escanear as próximas encomendas com esse mesmo código não fazia nada:
+    // nem erro, nem separação nova — o contador simplesmente parava de subir
+    // mesmo com pacotes de verdade passando pela câmera. Agora prefere uma
+    // linha AINDA NÃO separada daquele código (se houver uma), então cada
+    // encomenda física com o código repetido avança uma linha diferente em
+    // vez de martelar sempre a mesma.
+    var candidatas = state.linhasParseadas.filter(function (l) { return !l.erro && l.codigo && l.codigo === codigo; });
+    if (!candidatas.length) { state.resultadoScan = { encontrado: false, codigo: codigo }; render(); return; }
+    var linha = candidatas.find(function (l) { return !statusDe(l.id).separado; }) || candidatas[0];
 
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
     var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch, calcularSplitsPorRua()) : null;
@@ -1773,8 +1835,11 @@
             '<span style="flex:1"><span style="font-size:16px;font-weight:700">n\u00ba ' + esc(item.numero) + "</span>" +
             (qtdMesmoNumero > 1 ? '<span style="font-size:14px;font-weight:700;color:var(--accent-deep)"> \u00b7 ' + qtdMesmoNumero + " pacotes</span>" : "") + "</span>" +
             (qtdMesmoNumero > 1 && semFotoNoEndereco > 0 ? '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill">\u{1F4F7} Todas (' + semFotoNoEndereco + ')</button>' : "") +
-            '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (temFachada ? " ativo-entregue" : (fachadaPendente ? " ativo-pendente" : "")) + '">' +
-            (temFachada ? "\u2713" : (fachadaPendente ? "\u23f3" : "\u{1F4F7}")) + " Fachada</button>" +
+            (temFachada
+              ? '<button data-action="ver-foto-fachada" data-chave="' + chaveEndereco + '" class="pill ativo-entregue">\u2713 Fachada</button>' +
+                '<button data-action="apagar-fachada" data-chave="' + chaveEndereco + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>'
+              : '<button data-action="foto-fachada" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (fachadaPendente ? " ativo-pendente" : "") + '">' +
+                (fachadaPendente ? "\u23f3" : "\u{1F4F7}") + " Fachada</button>") +
             '<input data-action="quem-recebeu-endereco" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" value="' + esc(quemRecebeuEndereco) + '" placeholder="Quem recebeu ' + (qtdMesmoNumero === 1 ? "esse pacote" : "esses " + qtdMesmoNumero + " pacotes") + ' (ex: porteiro)" style="flex:1 1 100%;font-size:12px;padding:6px 8px;border-radius:6px;border:1px solid var(--line);color:var(--ink);background:var(--paper-light)" />' +
             "</li>";
         }
@@ -1843,6 +1908,11 @@
     if (resultado.erros.length > 0) {
       html += '<details class="muted" style="margin-bottom:12px;font-size:12px"><summary style="cursor:pointer">' + resultado.erros.length + " " + plural(resultado.erros.length, "linha n\u00e3o reconhecida", "linhas n\u00e3o reconhecidas") + "</summary><ul style='margin-top:4px;padding-left:18px'>" +
         resultado.erros.map(function (e) { return "<li style='font-family:ui-monospace,monospace'>" + esc(e.raw) + "</li>"; }).join("") + "</ul></details>";
+    }
+
+    if (resultado.duplicados.length > 0) {
+      html += '<details class="warn-box" style="margin-bottom:12px;font-size:12px"><summary style="cursor:pointer;font-weight:600">' + resultado.duplicados.length + " " + plural(resultado.duplicados.length, "c\u00f3digo repetido", "c\u00f3digos repetidos") + " na lista \u2014 pode ser a causa do contador n\u00e3o subir ao escanear</summary><ul style='margin-top:4px;padding-left:18px'>" +
+        resultado.duplicados.map(function (d) { return "<li style='font-family:ui-monospace,monospace'>" + esc(d.codigo) + " \u2014 aparece " + d.vezes + " vezes</li>"; }).join("") + "</ul></details>";
     }
 
     html += renderListaGrupos(resultado);
@@ -1992,13 +2062,21 @@
     var apagarFotoVisBtn = app.querySelector('[data-action="apagar-foto-visualizando"]');
     if (apagarFotoVisBtn) {
       apagarFotoVisBtn.onclick = function () {
-        var linhaId = state.fotoVisualizando && state.fotoVisualizando.linhaId;
+        var vis = state.fotoVisualizando;
         fecharFotoVisualizando();
-        if (linhaId) apagarFotoPacote(linhaId);
+        if (!vis) return;
+        if (vis.tipo === "fachada") apagarFachada(vis.chave);
+        else apagarFotoPacote(vis.linhaId);
       };
     }
     app.querySelectorAll('[data-action="foto-fachada"]').forEach(function (el) {
       el.onclick = function () { abrirFachadaFoto(el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
+    });
+    app.querySelectorAll('[data-action="ver-foto-fachada"]').forEach(function (el) {
+      el.onclick = function () { verFotoFachada(el.getAttribute("data-chave")); };
+    });
+    app.querySelectorAll('[data-action="apagar-fachada"]').forEach(function (el) {
+      el.onclick = function () { apagarFachada(el.getAttribute("data-chave")); };
     });
     app.querySelectorAll('[data-action="foto-lote"]').forEach(function (el) {
       el.onclick = function () { abrirLoteFoto(el.getAttribute("data-rua"), el.getAttribute("data-numero")); };
