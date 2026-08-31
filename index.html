@@ -568,7 +568,10 @@
     return state.linhasParseadas.filter(function (l) {
       if (l.erro || String(l.numero) !== String(numero)) return false;
       var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
-      return !!ruaMatch && ruaMatch.nome === ruaNome;
+      // Rua ainda não cadastrada nas Faixas: compara pelo nome cru da lista
+      // (é assim que a caixa cinza "sem faixa" identifica o endereço dela).
+      if (!ruaMatch) return normalizar(l.rua) === normalizar(ruaNome);
+      return ruaMatch.nome === ruaNome;
     });
   }
 
@@ -593,6 +596,9 @@
   }
 
   var PALETA_CORES = ["#E53935", "#FB8C00", "#FDD835", "#43A047", "#00897B", "#1E88E5", "#3949AB", "#8E24AA", "#D81B60", "#6D4C41"];
+  // cinza neutro das caixas de rua ainda não cadastrada nas Faixas — de
+  // propósito fora da paleta, pra não ser confundido com uma cor de separação.
+  var COR_SEM_FAIXA = "#9E9E9E";
 
   function coresPadrao() {
     return { par1: "#1E88E5", par2: "#3949AB", impar1: "#FB8C00", impar2: "#6D4C41" };
@@ -1039,8 +1045,11 @@
           if (!localSt) return;
           var remotoSt = dados[l.codigo] || {};
           var atrasado = (localSt.separado && !remotoSt.separado) || (localSt.entregue && !remotoSt.entregue) || (localSt.devolvido && !remotoSt.devolvido);
-          if (atrasado) fbDb.ref("lotes/" + chaveRota + "/pacotes/" + l.codigo).set(localSt);
+          if (atrasado) fbDb.ref("lotes/" + chaveRota + "/pacotes/" + l.codigo).set({
+            separado: !!localSt.separado, entregue: !!localSt.entregue, devolvido: !!localSt.devolvido, ts: Date.now()
+          });
         });
+        limparPacotesAntigos(chaveRota, dados);
       }
       if (mudou) salvarSessao();
       render();
@@ -1107,7 +1116,40 @@
     var linha = state.linhasParseadas.find(function (l) { return l.id === id; });
     if (!linha || !linha.codigo) return;
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
-    fbDb.ref("lotes/" + chaveRota + "/pacotes/" + linha.codigo).set(state.pacoteStatus[id]);
+    var st = state.pacoteStatus[id] || {};
+    // O "ts" é o que permite saber, depois, de que dia é cada marcação — sem
+    // ele não dava pra limpar o nó "pacotes" (ver limparPacotesAntigos).
+    fbDb.ref("lotes/" + chaveRota + "/pacotes/" + linha.codigo).set({
+      separado: !!st.separado, entregue: !!st.entregue, devolvido: !!st.devolvido, ts: Date.now()
+    });
+  }
+
+  // "entregas" é separado por data e já era limpo depois de 2 dias, mas
+  // "pacotes" não tem data no caminho: ele ia acumulando TODOS os códigos de
+  // TODOS os dias da rota, pra sempre. Em ~400 pacotes/dia isso vira dezenas
+  // de milhares de registros que o app rebaixa inteiros toda vez que abre —
+  // fica lento e queima a franquia de download do Firebase (o plano gratuito
+  // dá 10 GB/mês; estourou, o banco para de responder e a sincronização morre
+  // sozinha no meio do mês).
+  // Só roda num aparelho que já tem a lista de hoje carregada, e nunca
+  // encosta nos códigos dessa lista nem em marcação recente de outro dia.
+  function limparPacotesAntigos(chaveRota, dados) {
+    if (!fbDb || !state.linhasParseadas || !dados) return;
+    var deHoje = {};
+    state.linhasParseadas.forEach(function (l) { if (!l.erro && l.codigo) deHoje[l.codigo] = true; });
+    var limite = Date.now() - 2 * 86400000;
+    var apagar = {};
+    var n = 0;
+    Object.keys(dados).forEach(function (codigo) {
+      if (deHoje[codigo]) return;
+      var ts = dados[codigo] && dados[codigo].ts;
+      if (typeof ts === "number" && ts > limite) return;
+      apagar[codigo] = null;
+      n++;
+    });
+    // Uma única chamada apaga tudo de uma vez (em vez de milhares de remoções
+    // separadas, que sozinhas já dariam o problema que estamos evitando).
+    if (n) fbDb.ref("lotes/" + chaveRota + "/pacotes").update(apagar).catch(function () {});
   }
 
   function incrementarContadorGlobal() {
@@ -1291,7 +1333,19 @@
 
     validas.forEach(function (l) {
       var ruaMatch = encontrarRuaMapeada(l.rua, state.mapaRuas);
-      if (!ruaMatch) { naoMapeadas[l.rua] = true; return; }
+      if (!ruaMatch) {
+        // Antes, pacote de rua fora das Faixas simplesmente SUMIA da aba Hoje:
+        // não entrava em nenhuma caixa, não dava pra marcar e — o pior — não
+        // entrava na conta de "separados". O contador chegava, por exemplo, em
+        // "70/70" e travava ali, mesmo com 30 pacotes ainda por separar.
+        // Agora eles ganham uma caixa cinza própria no fim da lista: aparecem,
+        // dá pra separar, e a conta bate com o tamanho real da lista.
+        naoMapeadas[l.rua] = true;
+        var keySem = "SEMFAIXA|" + normalizar(l.rua);
+        if (!porGrupo[keySem]) porGrupo[keySem] = { ruaNome: l.rua, label: "SEM FAIXA", cor: COR_SEM_FAIXA, itens: [], semFaixa: true };
+        porGrupo[keySem].itens.push(l);
+        return;
+      }
       var c = classificar(l.numero, ruaMatch, splits);
       var key = ruaMatch.id + "|" + c.cor;
       if (!porGrupo[key]) porGrupo[key] = { ruaNome: ruaMatch.nome, label: c.label, cor: c.cor, itens: [] };
@@ -1301,8 +1355,11 @@
     var listaGrupos = Object.keys(porGrupo).map(function (k) {
       var g = porGrupo[k];
       var itens = g.itens.slice().sort(function (a, b) { return ordenarNumerico(a.numero, b.numero); });
-      return { ruaNome: g.ruaNome, label: g.label, cor: g.cor, itens: itens, total: itens.length };
+      return { ruaNome: g.ruaNome, label: g.label, cor: g.cor, itens: itens, total: itens.length, semFaixa: !!g.semFaixa };
     }).sort(function (a, b) {
+      // as caixas "sem faixa" ficam sempre no fim, pra não atrapalhar quem
+      // está separando pelas cores.
+      if (a.semFaixa !== b.semFaixa) return a.semFaixa ? 1 : -1;
       var rc = a.ruaNome.localeCompare(b.ruaNome, "pt-BR");
       return rc !== 0 ? rc : a.cor.localeCompare(b.cor);
     });
@@ -1779,7 +1836,8 @@
     }
 
     if (resultado.naoMapeadas.length > 0) {
-      html += '<div class="warn-box" style="margin-bottom:12px"><strong>ruas n\u00e3o reconhecidas:</strong> ' + resultado.naoMapeadas.map(esc).join(", ") + ' \u2014 cadastre na aba "Faixas".</div>';
+      html += '<div class="warn-box" style="margin-bottom:12px"><strong>ruas ainda sem faixa:</strong> ' + resultado.naoMapeadas.map(esc).join(", ") +
+        ' \u2014 esses pacotes est\u00e3o nas caixas cinza no fim da lista (contam normal). Cadastre na aba "Faixas" pra eles ganharem cor.</div>';
     }
 
     if (resultado.erros.length > 0) {
