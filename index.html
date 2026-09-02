@@ -924,6 +924,7 @@
     entregaInfo: {},
     fachadaInfo: {},
     baixandoZip: false,
+    baixandoZipChave: null,
     statusCamera: "idle",
     erroCamera: "",
     resultadoScan: null,
@@ -1492,55 +1493,126 @@
     render();
   }
 
+  // Agrupa as entregas cruas do Firebase por endereço (chave) — usado tanto
+  // pelo zip do dia inteiro quanto pelo zip de um endereço só, pra nunca
+  // desencontrar o critério de "virou VARIAS-LOJAS" nem o nome dos arquivos
+  // entre os dois.
+  function montarGruposParaZip(entregas, fachadas) {
+    var porChave = {};
+    Object.keys(entregas).forEach(function (codigo) {
+      var it = entregas[codigo];
+      if (!it.chave) return;
+      if (!porChave[it.chave]) porChave[it.chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null, quemRecebeu: "" };
+      // Um pacote pode ter mais de uma foto agora (ex: loja específica
+      // dentro de um shopping) — cada uma vira um arquivo no zip. O "|| []"
+      // com fallback pro campo antigo "fotoPacoteUrl" é só compatibilidade
+      // com fotos tiradas antes dessa atualização.
+      var urlsDoPacote = it.fotos
+        ? Object.keys(it.fotos).sort(function (a, b) { return (+a) - (+b); }).map(function (k) { return it.fotos[k]; })
+        : (it.fotoPacoteUrl ? [it.fotoPacoteUrl] : []);
+      // Prioriza quem realmente recebeu (ex: porteiro) sobre o nome do
+      // destinatário da lista colada — é o que sai na foto agora.
+      urlsDoPacote.forEach(function (url, slot) {
+        porChave[it.chave].pacotes.push({ nome: it.quemRecebeu || it.nome || "pacote", codigo: codigo, url: url, slot: slot });
+      });
+      // Guarda também no nível do endereço, pra ir no nome da pasta do zip.
+      if (!porChave[it.chave].quemRecebeu && it.quemRecebeu) porChave[it.chave].quemRecebeu = it.quemRecebeu;
+      // Shopping: cada pacote foi recebido por uma loja diferente. Aí não
+      // dá pra pôr um nome só na pasta — ela vira "VARIAS-LOJAS" e o nome
+      // de quem recebeu em cada loja fica no nome de cada arquivo.
+      if (it.quemRecebeu && porChave[it.chave].quemRecebeu && it.quemRecebeu !== porChave[it.chave].quemRecebeu) {
+        porChave[it.chave].variasLojas = true;
+      }
+    });
+    // "fachadas" aqui é o acervo permanente da rota inteira (todos os
+    // endereços já fotografados, de qualquer dia) — só entra no zip a
+    // fachada de quem também teve pacote entregue hoje (por isso não cria
+    // uma pasta nova aqui, só complementa uma que já existe pelas entregas).
+    Object.keys(fachadas).forEach(function (chave) {
+      if (!porChave[chave]) return;
+      porChave[chave].fotoFachadaUrl = fachadas[chave].fotoFachadaUrl;
+    });
+    return porChave;
+  }
+
+  // Nome da pasta já sai com rua, número e quem recebeu juntos, pra na hora
+  // de dar baixa no app da J&T não precisar abrir nada — só olhar o nome da
+  // pasta. "prefixo" é o número de ordem (só faz sentido com mais de uma
+  // pasta no mesmo zip — o zip de um endereço só não usa).
+  function nomePastaZip(g, prefixo) {
+    var sufixoPasta = g.variasLojas
+      ? "_VARIAS-LOJAS"
+      : (g.quemRecebeu ? "_" + sanitizarChaveFirebase(g.quemRecebeu).replace(/\s+/g, "-") : "");
+    return (prefixo ? prefixo + "_" : "") + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero + sufixoPasta;
+  }
+
+  function itensParaZipDoGrupo(g, nomePasta) {
+    var itens = [];
+    if (g.fotoFachadaUrl) itens.push({ nomePasta: nomePasta, nomeArquivo: "fachada.jpg", url: g.fotoFachadaUrl });
+    g.pacotes.forEach(function (p) {
+      if (!p.url) return;
+      // Sempre inclui o código junto do nome: como vários pacotes do mesmo
+      // endereço podem ficar com o mesmo "quem recebeu" (ex: vários
+      // "Porteiro" na mesma pasta), o código garante que nenhum arquivo
+      // sobrescreva o outro dentro do zip. Quando o próprio pacote tem mais
+      // de 1 foto, a 2ª em diante ganha "_2", "_3"... no nome (a 1ª fica sem
+      // sufixo, igual sempre foi).
+      var nomeArq = sanitizarChaveFirebase(p.nome).replace(/\s+/g, "-") + "_" + p.codigo + (p.slot > 0 ? "_" + (p.slot + 1) : "") + ".jpg";
+      itens.push({ nomePasta: nomePasta, nomeArquivo: nomeArq, url: p.url });
+    });
+    return itens;
+  }
+
+  // Baixa tudo em paralelo (rápido), mas só encaixa no zip DEPOIS que tudo já
+  // chegou — um de cada vez, na ordem exata da lista recebida. Isso é o que
+  // garante a ordem certa dentro do zip, não importa qual foto demorou mais
+  // ou menos pra baixar (foi exatamente isso: a pasta 04 baixou mais rápido
+  // que a 02 e entrou antes dela no arquivo, quando cada foto entrava assim
+  // que terminava de baixar).
+  function gerarEBaixarZip(itensParaBuscar, nomeArquivoZip, aoTerminar) {
+    Promise.all(itensParaBuscar.map(function (it) {
+      return fetch(it.url).then(function (r) { return r.blob(); }).catch(function () { return null; });
+    })).then(function (blobs) {
+      var zip = new JSZip();
+      // O Google Fotos não agrupa "por nome" — ele ordena os álbuns/pastas
+      // pela data da foto mais recente ali dentro, e as fotos daqui não
+      // carregam data própria (viram canvas na hora de comprimir/tirar,
+      // perdem o EXIF), então ele cai pra data do arquivo. Aqui a gente
+      // CARIMBA essa data explicitamente no zip, decrescendo uma a uma na
+      // ordem certa (o primeiro item fica com a foto "mais recente", o
+      // último com a mais antiga) — é o que faz o Google Fotos (que mostra o
+      // mais recente primeiro) respeitar a mesma ordem da lista.
+      var agora = Date.now();
+      itensParaBuscar.forEach(function (it, i) {
+        if (blobs[i]) zip.folder(it.nomePasta).file(it.nomeArquivo, blobs[i], { date: new Date(agora - i * 10000) });
+      });
+      return zip.generateAsync({ type: "blob" });
+    }).then(function (blob) {
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement("a");
+      a.href = url;
+      a.download = nomeArquivoZip;
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+      aoTerminar();
+    }).catch(function () {
+      aoTerminar();
+    });
+  }
+
   function baixarFotosDoDia() {
-    if (!fbDb || !state.minhaRota || typeof JSZip === "undefined") return;
+    if (!fbDb || !state.minhaRota || typeof JSZip === "undefined" || state.baixandoZip) return;
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
     var data = dataDeHoje();
     state.baixandoZip = true;
+    state.baixandoZipChave = null;
     render();
 
     Promise.all([
       fbDb.ref("lotes/" + chaveRota + "/entregas/" + data).once("value"),
       fbDb.ref("lotes/" + chaveRota + "/fachadas_permanentes").once("value")
     ]).then(function (resultados) {
-      var entregas = resultados[0].val() || {};
-      var fachadas = resultados[1].val() || {};
-      var porChave = {};
-
-      Object.keys(entregas).forEach(function (codigo) {
-        var it = entregas[codigo];
-        if (!it.chave) return;
-        if (!porChave[it.chave]) porChave[it.chave] = { rua: it.rua, numero: it.numero, pacotes: [], fachadaUrl: null, quemRecebeu: "" };
-        // Um pacote pode ter mais de uma foto agora (ex: loja específica
-        // dentro de um shopping) — cada uma vira um arquivo no zip. O "|| []"
-        // com fallback pro campo antigo "fotoPacoteUrl" é só compatibilidade
-        // com fotos tiradas antes dessa atualização.
-        var urlsDoPacote = it.fotos
-          ? Object.keys(it.fotos).sort(function (a, b) { return (+a) - (+b); }).map(function (k) { return it.fotos[k]; })
-          : (it.fotoPacoteUrl ? [it.fotoPacoteUrl] : []);
-        // Prioriza quem realmente recebeu (ex: porteiro) sobre o nome do
-        // destinatário da lista colada — é o que sai na foto agora.
-        urlsDoPacote.forEach(function (url, slot) {
-          porChave[it.chave].pacotes.push({ nome: it.quemRecebeu || it.nome || "pacote", codigo: codigo, url: url, slot: slot });
-        });
-        // Guarda também no nível do endereço, pra ir no nome da pasta do zip.
-        if (!porChave[it.chave].quemRecebeu && it.quemRecebeu) porChave[it.chave].quemRecebeu = it.quemRecebeu;
-        // Shopping: cada pacote foi recebido por uma loja diferente. Aí não
-        // dá pra pôr um nome só na pasta — ela vira "VARIAS-LOJAS" e o nome
-        // de quem recebeu em cada loja fica no nome de cada arquivo.
-        if (it.quemRecebeu && porChave[it.chave].quemRecebeu && it.quemRecebeu !== porChave[it.chave].quemRecebeu) {
-          porChave[it.chave].variasLojas = true;
-        }
-      });
-      // "fachadas" aqui é o acervo permanente da rota inteira (todos os
-      // endereços já fotografados, de qualquer dia) — só entra no zip de hoje
-      // a fachada de quem também teve pacote entregue hoje (por isso não cria
-      // uma pasta nova aqui, só complementa uma que já existe pelas entregas).
-      Object.keys(fachadas).forEach(function (chave) {
-        if (!porChave[chave]) return;
-        porChave[chave].fotoFachadaUrl = fachadas[chave].fotoFachadaUrl;
-      });
-
+      var porChave = montarGruposParaZip(resultados[0].val() || {}, resultados[1].val() || {});
       var chavesOrdenadas = Object.keys(porChave).sort();
       if (chavesOrdenadas.length === 0) {
         state.baixandoZip = false;
@@ -1548,79 +1620,64 @@
         return;
       }
 
-      var zip = new JSZip();
-      // Largura do zero à esquerda cresce com o total de endereços do dia, pra
-      // "001_", "002_"... continuar ordenando certinho mesmo se a rota (agora
-      // somando você + ajudante) passar de 99 endereços num dia só.
+      // Largura do zero à esquerda cresce com o total de endereços do dia,
+      // pra "001_", "002_"... continuar ordenando certinho mesmo se a rota
+      // (agora somando você + ajudante) passar de 99 endereços num dia só.
       var digitosOrdem = Math.max(2, String(chavesOrdenadas.length).length);
-      // Monta a lista de tudo que precisa baixar, já na ordem certa — mas
-      // ainda sem tocar no zip. Se cada foto entrasse no zip assim que
-      // terminasse de baixar (como era antes), quem tivesse conexão mais
-      // rápida furava a fila e a ordem das pastas saía embaralhada (foi
-      // exatamente isso: a pasta 04 baixou mais rápido que a 02 e entrou
-      // antes dela no arquivo).
       var itensParaBuscar = [];
       chavesOrdenadas.forEach(function (chave, idx) {
         var g = porChave[chave];
-        // Nome da pasta já sai com rua, número e quem recebeu juntos, pra na
-        // hora de dar baixa no app da J&T não precisar abrir nada — só olhar
-        // o nome da pasta.
-        var sufixoPasta = g.variasLojas
-          ? "_VARIAS-LOJAS"
-          : (g.quemRecebeu ? "_" + sanitizarChaveFirebase(g.quemRecebeu).replace(/\s+/g, "-") : "");
-        var nomePasta = String(idx + 1).padStart(digitosOrdem, "0") + "_" + sanitizarChaveFirebase(g.rua).replace(/\s+/g, "-") + "_" + g.numero + sufixoPasta;
-        if (g.fotoFachadaUrl) {
-          itensParaBuscar.push({ nomePasta: nomePasta, nomeArquivo: "fachada.jpg", url: g.fotoFachadaUrl });
-        }
-        g.pacotes.forEach(function (p) {
-          if (!p.url) return;
-          // Sempre inclui o código junto do nome: como agora vários pacotes do
-          // mesmo endereço podem ficar com o mesmo "quem recebeu" (ex: vários
-          // "Porteiro" na mesma pasta), o código garante que nenhum arquivo
-          // sobrescreva o outro dentro do zip. Quando o próprio pacote tem
-          // mais de 1 foto, a 2ª em diante ganha "_2", "_3"... no nome (a 1ª
-          // fica sem sufixo, igual sempre foi).
-          var nomeArq = sanitizarChaveFirebase(p.nome).replace(/\s+/g, "-") + "_" + p.codigo + (p.slot > 0 ? "_" + (p.slot + 1) : "") + ".jpg";
-          itensParaBuscar.push({ nomePasta: nomePasta, nomeArquivo: nomeArq, url: p.url });
-        });
+        var prefixo = String(idx + 1).padStart(digitosOrdem, "0");
+        itensParaBuscar = itensParaBuscar.concat(itensParaZipDoGrupo(g, nomePastaZip(g, prefixo)));
       });
 
-      // Baixa tudo em paralelo (rápido), mas só encaixa no zip DEPOIS que
-      // tudo já chegou — um de cada vez, na ordem exata da lista acima. Isso
-      // é o que garante a ordem certa dentro do zip, não importa qual foto
-      // demorou mais ou menos pra baixar.
-      Promise.all(itensParaBuscar.map(function (it) {
-        return fetch(it.url).then(function (r) { return r.blob(); }).catch(function () { return null; });
-      })).then(function (blobs) {
-        // A ordem do nome da pasta já tava certa, mas o Google Fotos não
-        // agrupa "por nome" — ele ordena os álbuns/pastas pela data da foto
-        // mais recente ali dentro, e as fotos daqui não carregam data (viram
-        // canvas na hora de comprimir/tirar, perdem o EXIF). Sem data própria,
-        // ele cai pra data do arquivo. Aqui a gente CARIMBA essa data
-        // explicitamente no zip, decrescendo uma a uma na ordem certa (a
-        // primeira pasta fica com a foto "mais recente", a última com a mais
-        // antiga) — é o que faz o Google Fotos (que mostra o mais recente
-        // primeiro) respeitar a mesma ordem das pastas.
-        var agora = Date.now();
-        itensParaBuscar.forEach(function (it, i) {
-          if (blobs[i]) zip.folder(it.nomePasta).file(it.nomeArquivo, blobs[i], { date: new Date(agora - i * 10000) });
-        });
-        return zip.generateAsync({ type: "blob" });
-      }).then(function (blob) {
-        var url = URL.createObjectURL(blob);
-        var a = document.createElement("a");
-        a.href = url;
-        a.download = "fotos-" + chaveRota + "-" + data + ".zip";
-        a.click();
-        setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
-        state.baixandoZip = false;
-        render();
-      }).catch(function () {
+      gerarEBaixarZip(itensParaBuscar, "fotos-" + chaveRota + "-" + data + ".zip", function () {
         state.baixandoZip = false;
         render();
       });
     }).catch(function () {
       state.baixandoZip = false;
+      render();
+    });
+  }
+
+  // "Baixar" de um endereço só, direto na lista — pra quem dá baixa no app
+  // da J&T não precisar esperar o dia inteiro terminar pra começar a
+  // processar. Reusa o mesmo agrupamento e nomeação do zip do dia inteiro
+  // (montarGruposParaZip/nomePastaZip/itensParaZipDoGrupo), então o nome da
+  // pasta e dos arquivos sai idêntico ao que sairia lá dentro do zip grande
+  // — só que sem o número de ordem na frente, que só faz sentido quando tem
+  // mais de uma pasta no mesmo zip.
+  function baixarFotosDoEndereco(chaveEndereco) {
+    if (!fbDb || !state.minhaRota || typeof JSZip === "undefined" || state.baixandoZip) return;
+    var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+    var data = dataDeHoje();
+    state.baixandoZip = true;
+    state.baixandoZipChave = chaveEndereco;
+    render();
+
+    Promise.all([
+      fbDb.ref("lotes/" + chaveRota + "/entregas/" + data).once("value"),
+      fbDb.ref("lotes/" + chaveRota + "/fachadas_permanentes").once("value")
+    ]).then(function (resultados) {
+      var porChave = montarGruposParaZip(resultados[0].val() || {}, resultados[1].val() || {});
+      var g = porChave[chaveEndereco];
+      if (!g) {
+        state.baixandoZip = false;
+        state.baixandoZipChave = null;
+        render();
+        return;
+      }
+      var nomePasta = nomePastaZip(g, null);
+      var itensParaBuscar = itensParaZipDoGrupo(g, nomePasta);
+      gerarEBaixarZip(itensParaBuscar, "fotos-" + chaveRota + "-" + data + "_" + nomePasta + ".zip", function () {
+        state.baixandoZip = false;
+        state.baixandoZipChave = null;
+        render();
+      });
+    }).catch(function () {
+      state.baixandoZip = false;
+      state.baixandoZipChave = null;
       render();
     });
   }
@@ -2288,6 +2345,15 @@
           var semFotoNoEndereco = itensDoEndereco.filter(function (it) {
             return !temFotoPacote(it.id) && !pacotePendenteFila(it.id);
           }).length;
+          // Só oferece baixar esse endereço depois que já existe alguma foto
+          // de PACOTE confirmada (não uma que ainda só está pendente na fila,
+          // sem internet — essa não entraria no zip mesmo, que busca direto
+          // na nuvem). A fachada sozinha não basta: assim como no zip do dia
+          // inteiro, ela só entra junto de um pacote entregue hoje nesse
+          // mesmo endereço (ver montarGruposParaZip) — sem isso o botão
+          // apareceria por causa da fachada e o download sairia vazio.
+          var temAlgoParaBaixarNoEndereco = itensDoEndereco.some(function (it) { return temFotoPacote(it.id); });
+          var baixandoEsseEndereco = state.baixandoZip && state.baixandoZipChave === chaveEndereco;
           var quemRecebeuEndereco = "";
           for (var qi = 0; qi < itensDoEndereco.length; qi++) {
             var qv = (state.entregaInfo[itensDoEndereco[qi].id] && state.entregaInfo[itensDoEndereco[qi].id].quemRecebeu) || "";
@@ -2306,6 +2372,14 @@
             (qtdMesmoNumero > 1
               ? '<button data-action="alternar-individual" data-chave="' + chaveEndereco + '" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (lojaPorLoja ? " ativo-entregue" : "") + '">' +
                 (lojaPorLoja ? "\ud83c\udfea Loja por loja" : "\ud83c\udfe2 Um nome pra todos") + "</button>"
+              : "") +
+            // Baixar esse endereço na hora, sem esperar o resto da rota — pra
+            // quem dá baixa no app da J&T ir processando ao longo do dia. O
+            // botão "Baixar fotos de hoje" continua igual, pra quem prefere
+            // deixar tudo pro fim do dia.
+            (temAlgoParaBaixarNoEndereco
+              ? '<button data-action="baixar-endereco" data-chave="' + chaveEndereco + '" class="pill"' + (state.baixandoZip ? " disabled" : "") + ' style="background:var(--accent-deep);color:#fff">' +
+                (baixandoEsseEndereco ? "⏳ Baixando..." : "\u{1F4E5} Baixar") + "</button>"
               : "") +
             // Shopping: cada loja tem quem assina; o campo do endereço sai de
             // cena e cada pacote ganha o seu, logo abaixo do nome dele.
@@ -2382,7 +2456,7 @@
 
     if (cloudinaryPronto && state.minhaRota) {
       html += '<button data-action="baixar-zip" class="btn-primary" style="margin-bottom:12px"' + (state.baixandoZip ? " disabled" : "") + ">" +
-        (state.baixandoZip ? "Preparando o zip..." : "\u{1F4E5} Baixar fotos de hoje (zip, em ordem)") + "</button>";
+        (state.baixandoZip && !state.baixandoZipChave ? "Preparando o zip..." : "\u{1F4E5} Baixar fotos de hoje (zip, em ordem)") + "</button>";
     }
 
     if (resultado.naoMapeadas.length > 0) {
@@ -2595,6 +2669,9 @@
     };
     var baixarZipBtn = app.querySelector('[data-action="baixar-zip"]');
     if (baixarZipBtn) baixarZipBtn.onclick = baixarFotosDoDia;
+    app.querySelectorAll('[data-action="baixar-endereco"]').forEach(function (el) {
+      el.onclick = function () { baixarFotosDoEndereco(el.getAttribute("data-chave")); };
+    });
     var reenviarBtn = app.querySelector('[data-action="reenviar-pendentes"]');
     if (reenviarBtn) reenviarBtn.onclick = tentarReenviarFila;
 
