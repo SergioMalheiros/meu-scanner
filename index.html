@@ -275,6 +275,21 @@
   function temFotoPacote(linhaId) {
     return fotosDoPacote(linhaId).length > 0;
   }
+  // Próximo slot livre pra uma NOVA foto desse pacote — precisa contar tanto
+  // as já confirmadas (fotosDoPacote, vindas do Firebase) quanto as que ainda
+  // estão só na fila de reenvio (internet caiu bem na hora de enviar): sem
+  // isso, adicionar uma foto extra enquanto a anterior ainda não confirmou
+  // podia calcular o mesmo slot pras duas e uma sobrescrever a outra quando
+  // as duas finalmente chegassem no Firebase.
+  function proximoSlotPacote(linhaId) {
+    var maior = fotosDoPacote(linhaId).length;
+    state.filaPendente.forEach(function (p) {
+      if (p.tipo === "pacote" && p.linhaId === linhaId && typeof p.slotIdx === "number") {
+        maior = Math.max(maior, p.slotIdx + 1);
+      }
+    });
+    return maior;
+  }
 
   function gravarFotoNoFirebase(item, url) {
     if (item.tipo === "pacote") {
@@ -397,6 +412,24 @@
       fbDb.ref("lotes/" + chaveRota + "/entregas/" + dataDeHoje() + "/" + linha.codigo + "/fotos").remove();
     }
     render();
+  }
+
+  // "Esqueci de fotografar a frente da loja e só fui perceber depois de já
+  // ter ido embora" — sem isso, a única forma de acrescentar a foto que
+  // faltou era apagar TODAS as fotos daquele pacote (inclusive a que já
+  // estava certa) e tirar tudo de novo, o que na prática significa voltar e
+  // pedir o pacote de volta pra pessoa que recebeu — uma situação
+  // constrangedora. Esse caminho abre a mesma câmera ao vivo de sempre, só
+  // que fechada num único pacote, pra somar uma foto nova às que já foram
+  // enviadas, sem mexer nelas.
+  function abrirFotoExtraPacote(linhaId) {
+    if (!state.linhasParseadas) return;
+    var linha = state.linhasParseadas.find(function (l) { return l.id === linhaId; });
+    if (!linha || !linha.codigo) return;
+    definirFoco("pacote-" + linhaId);
+    state.loteFoto = { tipo: "pacotes", modoExtra: true, ruaNome: linha.rua, numero: linha.numero, itens: [linha], fotos: [], statusCamera: "pedindo", erro: "" };
+    render();
+    iniciarCameraLote();
   }
 
   function abrirFachadaFoto(ruaNome, numero) {
@@ -644,9 +677,15 @@
     // Cada foto já sabe de qual pacote ela é (itemIdx) — não tem mais limite
     // de "1 foto por pacote": um endereço com lojas específicas (shopping)
     // pode ter 2+ fotos por pacote, cada uma vira um "slot" independente.
+    // O slot começa depois das que esse pacote JÁ tinha (proximoSlotPacote),
+    // não sempre do zero — importante pro caso de "foto extra" num pacote que
+    // já tinha sido enviado antes: sem isso, a foto nova sobrescreveria a(s)
+    // antiga(s) no mesmo slot em vez de somar.
     lote.itens.forEach(function (linha, idx) {
       var fotosDoItem = lote.fotos.filter(function (f) { return f.itemIdx === idx; });
-      fotosDoItem.forEach(function (f, slotIdx) {
+      var proximoSlot = proximoSlotPacote(linha.id);
+      fotosDoItem.forEach(function (f, i) {
+        var slotIdx = proximoSlot + i;
         var item = {
           tipo: "pacote",
           pasta: "fotos/" + chaveRota + "/" + data + "/" + chave,
@@ -1989,12 +2028,19 @@
     var itensComFoto = ehFachada ? 0 : lote.itens.filter(function (_, idx) {
       return lote.fotos.some(function (f) { return f.itemIdx === idx; });
     }).length;
+    // Modo "foto extra" (pacote que já tinha sido enviado antes, e alguém
+    // esqueceu uma foto na hora): mostra quantas ele JÁ tinha salvas, pra não
+    // parecer que a contagem voltou do zero.
+    var jaTinhaExtra = (!ehFachada && lote.modoExtra) ? fotosDoPacote(lote.itens[0].id).length : 0;
     var infoLinha = ehFachada
       ? (lote.fotos.length > 0 ? "foto pronta pra enviar" : "tire 1 foto da fachada do prédio")
+      : lote.modoExtra
+      ? ("já tem " + jaTinhaExtra + " " + plural(jaTinhaExtra, "foto salva", "fotos salvas") + " · essa é pra somar, não substitui")
       : (itensComFoto + '/' + lote.itens.length + ' pacotes com foto · ' + lote.fotos.length + ' ' + plural(lote.fotos.length, "foto tirada", "fotos tiradas"));
     var html = '<div style="padding:24px 0">';
     html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:12px;gap:8px">' +
-      '<div><p style="font-weight:700;font-size:15px;margin:0">' + esc(lote.ruaNome) + ' · nº ' + esc(lote.numero) + (ehFachada ? " · fachada" : "") + '</p>' +
+      '<div><p style="font-weight:700;font-size:15px;margin:0">' + esc(lote.ruaNome) + ' · nº ' + esc(lote.numero) +
+      (ehFachada ? " · fachada" : (lote.modoExtra ? " · " + esc(nomeItemLote(lote.itens[0], 0)) : "")) + '</p>' +
       '<p style="font-size:12px;opacity:.65;margin:2px 0 0">' + infoLinha + '</p></div>' +
       '<button data-action="cancelar-lote" style="border:none;background:none;font-size:22px;color:var(--ink);opacity:.6;cursor:pointer;flex-shrink:0">✕</button></div>';
 
@@ -2028,6 +2074,18 @@
         // de novo é só apagar a miniatura, que ele volta).
         if (lote.fotos.length === 0) {
           html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:16px">📸 Tirar foto da fachada</button>';
+        }
+      } else if (lote.modoExtra) {
+        // Só 1 pacote nesse lote e ele já tinha foto — não faz sentido usar
+        // os rótulos "foto do pacote"/"frente da loja" (que pressupõem uma
+        // sequência do zero). Um botão só, que vira "mais uma" depois da
+        // primeira, pro raro caso de faltar mais de uma foto.
+        if (!lote.fotos.length) {
+          html += '<button data-action="tirar-foto-lote" class="btn-primary" style="margin-top:12px;font-size:16px;padding:15px 16px;text-align:left">📷 Tirar a foto que faltou</button>';
+        } else {
+          var qtdNovaExtra = fotosDoItemLote(lote, 0);
+          html += '<button data-action="tirar-foto-extra-lote" class="btn-primary" style="margin-top:8px;font-size:15px;padding:14px 16px;text-align:left;background:var(--accent-deep)">📷 Mais uma foto' +
+            '<span style="display:block;font-size:11px;font-weight:400;opacity:.85;margin-top:3px">essa sessão já tem ' + qtdNovaExtra + ' ' + plural(qtdNovaExtra, "foto nova", "fotos novas") + '</span></button>';
         }
       } else {
         var proxIdx = proximoItemIdxLote(lote);
@@ -2083,8 +2141,11 @@
         var pacoteDaFoto = ehFachada ? null : lote.itens[f.itemIdx];
         var ehExtra = !ehFachada && lote.fotos.slice(0, idx).some(function (x) { return x.itemIdx === f.itemIdx; });
         // Agora a legenda mostra o NOME (num shopping, o nome é a loja) e se
-        // aquela foto é a do pacote ou a da frente da loja.
-        var legenda = ehFachada ? "fachada" : (pacoteDaFoto ? (cortarNome(nomeItemLote(pacoteDaFoto, f.itemIdx), 14) + " · " + (ehExtra ? "loja" : "pacote")) : "extra");
+        // aquela foto é a do pacote ou a da frente da loja. No modo "foto
+        // extra" não dá pra saber se é a foto do pacote ou da loja (o
+        // pacote já tinha foto de antes, essa é só "mais uma") — por isso
+        // aqui a legenda fica genérica em vez de arriscar rótulo errado.
+        var legenda = ehFachada ? "fachada" : lote.modoExtra ? "nova" : (pacoteDaFoto ? (cortarNome(nomeItemLote(pacoteDaFoto, f.itemIdx), 14) + " · " + (ehExtra ? "loja" : "pacote")) : "extra");
         html += '<div style="position:relative;flex-shrink:0;text-align:center">' +
           '<img src="' + f.previewUrl + '" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--line);display:block" />' +
           '<button data-action="remover-foto-lote" data-idx="' + idx + '" style="position:absolute;top:-6px;right:-6px;width:20px;height:20px;border-radius:50%;background:var(--alert);color:#fff;border:none;font-size:12px;line-height:1;cursor:pointer">✕</button>' +
@@ -2268,7 +2329,11 @@
         // nativa aqui, com endere\u00e7o de 1 ou v\u00e1rios pacotes.
         var botaoFoto;
         if (jaTemFoto) {
+          // "+" abre a c\u00e2mera s\u00f3 pra somar uma foto a mais (ex: esqueceu a
+          // frente da loja e s\u00f3 foi lembrar depois de j\u00e1 ter ido embora) \u2014
+          // sem precisar apagar e pedir o pacote de volta pra pessoa.
           botaoFoto = '<button data-action="ver-foto-pacote" data-id="' + item.id + '" class="pill ativo-entregue">\u2713 Foto' + (qtdFotosPacote > 1 ? " (" + qtdFotosPacote + ")" : "") + '</button>' +
+            '<button data-action="foto-extra-pacote" data-id="' + item.id + '" class="pill" title="Adicionar mais uma foto a esse pacote">+ \ud83d\udcf7</button>' +
             '<button data-action="apagar-foto-pacote" data-id="' + item.id + '" class="pill" style="background:var(--alert);color:#fff">\ud83d\uddd1\ufe0f</button>';
         } else {
           botaoFoto = '<button data-action="foto-lote" data-rua="' + esc(g.ruaNome) + '" data-numero="' + esc(item.numero) + '" class="pill' + (fotoPacotePendente ? " ativo-pendente" : "") + '">' +
@@ -2473,6 +2538,9 @@
     });
     app.querySelectorAll('[data-action="ver-foto-pacote"]').forEach(function (el) {
       el.onclick = function () { verFotoPacote(el.getAttribute("data-id")); };
+    });
+    app.querySelectorAll('[data-action="foto-extra-pacote"]').forEach(function (el) {
+      el.onclick = function () { abrirFotoExtraPacote(el.getAttribute("data-id")); };
     });
     app.querySelectorAll('[data-action="apagar-foto-pacote"]').forEach(function (el) {
       el.onclick = function () { apagarFotoPacote(el.getAttribute("data-id")); };
