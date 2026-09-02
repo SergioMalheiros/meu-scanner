@@ -1704,6 +1704,19 @@
     if (ultimoCodigo.codigo === codigo && agora - ultimoCodigo.ts < 2500) return;
     ultimoCodigo = { codigo: codigo, ts: agora };
 
+    // As etiquetas da J&T costumam trazer mais de um código: o de rastreio
+    // (sempre 15 dígitos, é o que interessa pra separação) e, em baixo, o
+    // código de barras de 44 dígitos da nota fiscal eletrônica (chave de
+    // acesso NF-e). Pra câmera nunca confundir um com outro nem mostrar
+    // aviso de "não encontrado" pra quem não é pacote, dois filtros
+    // redundantes de propósito (reforço, a pedido do Sérgio):
+    // 1) ignora por completo qualquer código de 44 dígitos;
+    // 2) só segue adiante quem tem exatamente 15 dígitos — qualquer outro
+    //    tamanho (incluindo o de 44) é tratado como se a câmera não tivesse
+    //    lido nada: sem aviso, sem beep, sem interromper a leitura.
+    if (/^\d{44}$/.test(codigo)) return;
+    if (!/^\d{15}$/.test(codigo)) return;
+
     if (!state.linhasParseadas) { state.resultadoScan = { encontrado: false, semLista: true, codigo: codigo }; render(); return; }
     // Quando o mesmo código aparece em mais de uma linha (lista com código
     // repetido — ver aviso em calcularResultado), escanear sempre pegava a
