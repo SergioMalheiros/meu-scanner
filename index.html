@@ -1742,7 +1742,7 @@
 
   // ---------- câmera ----------
   var streamAtual = null;
-  var ultimoCodigo = { codigo: null, ts: 0 };
+  var ultimoScan = { chave: null, ts: 0 };
 
   function pararCamera() {
     if (streamAtual) { streamAtual.getTracks().forEach(function (t) { t.stop(); }); streamAtual = null; }
@@ -1818,10 +1818,6 @@
   }
 
   function processarCodigoLido(codigo) {
-    var agora = Date.now();
-    if (ultimoCodigo.codigo === codigo && agora - ultimoCodigo.ts < 2500) return;
-    ultimoCodigo = { codigo: codigo, ts: agora };
-
     // As etiquetas da J&T costumam trazer mais de um código: o de rastreio
     // (sempre 15 dígitos, é o que interessa pra separação) e, em baixo, o
     // código de barras de 44 dígitos da nota fiscal eletrônica (chave de
@@ -1835,7 +1831,18 @@
     if (/^\d{44}$/.test(codigo)) return;
     if (!/^\d{15}$/.test(codigo)) return;
 
-    if (!state.linhasParseadas) { state.resultadoScan = { encontrado: false, semLista: true, codigo: codigo }; render(); return; }
+    var agora = Date.now();
+
+    if (!state.linhasParseadas) {
+      // Debounce simples pelo código bruto: aqui não tem "linha" nenhuma pra
+      // usar de chave, é só pra não ficar re-renderizando o mesmo aviso a
+      // cada quadro enquanto a câmera continua vendo a mesma etiqueta.
+      if (ultimoScan.chave === "semlista" && agora - ultimoScan.ts < 2500) return;
+      ultimoScan = { chave: "semlista", ts: agora };
+      state.resultadoScan = { encontrado: false, semLista: true, codigo: codigo };
+      render();
+      return;
+    }
     // Quando o mesmo código aparece em mais de uma linha (lista com código
     // repetido — ver aviso em calcularResultado), escanear sempre pegava a
     // PRIMEIRA linha daquele código. Se ela já tinha sido separada antes,
@@ -1846,8 +1853,29 @@
     // encomenda física com o código repetido avança uma linha diferente em
     // vez de martelar sempre a mesma.
     var candidatas = state.linhasParseadas.filter(function (l) { return !l.erro && l.codigo && l.codigo === codigo; });
-    if (!candidatas.length) { state.resultadoScan = { encontrado: false, codigo: codigo }; render(); return; }
+    if (!candidatas.length) {
+      if (ultimoScan.chave === codigo && agora - ultimoScan.ts < 2500) return;
+      ultimoScan = { chave: codigo, ts: agora };
+      state.resultadoScan = { encontrado: false, codigo: codigo };
+      render();
+      return;
+    }
     var linha = candidatas.find(function (l) { return !statusDe(l.id).separado; }) || candidatas[0];
+
+    // Evita repetir o bipe/flash/marcação várias vezes seguidas pro MESMO
+    // pacote enquanto a câmera ainda está vendo a etiqueta dele nos próximos
+    // quadros — mas a chave é a LINHA já resolvida acima, não o código bruto
+    // lido. Isso importa justamente no caso de código repetido: duas
+    // encomendas físicas diferentes com o mesmo código, escaneadas uma logo
+    // depois da outra (bem comum escaneando uma pilha inteira rápido),
+    // resolvem pra linhas diferentes acima — se o filtro fosse pelo código
+    // bruto, a 2ª ficaria bloqueada achando que era só a câmera vendo de
+    // novo a mesma etiqueta, e aquela encomenda nunca seria separada (foi
+    // exatamente isso que aconteceu: 100 pacotes escaneados, só 97
+    // separados — as 2 encomendas com código repetido escaneadas em
+    // sequência rápida perdiam a segunda pra esse filtro).
+    if (ultimoScan.chave === linha.id && agora - ultimoScan.ts < 2500) return;
+    ultimoScan = { chave: linha.id, ts: agora };
 
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
     var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch, calcularSplitsPorRua()) : null;
