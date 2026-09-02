@@ -962,28 +962,50 @@
         render();
       });
   }
-  // Puxa manualmente as Faixas que estão na nuvem pra este aparelho — pro caso
-  // (como o do celular que entrou na rota e não puxou sozinho) de precisar
-  // trazer de novo sem precisar mexer em cada rua uma por uma. Sempre pede
-  // confirmação, porque substitui o que já estiver cadastrado aqui.
-  function restaurarFaixasDaNuvem() {
+  // Puxa manualmente da nuvem, pra este aparelho: as Faixas E a lista de hoje
+  // (se já tiver uma). É o botão de emergência pro caso (como o do celular
+  // que entrou na rota e não puxou sozinho, ex: internet fraca bem na hora
+  // de conectar) de precisar trazer de novo sem ter que recadastrar rua por
+  // rua nem colar a lista de novo. Sempre pede confirmação, porque substitui
+  // o que já estiver aqui neste aparelho.
+  function restaurarDaNuvem() {
     if (!fbDb || !state.minhaRota) return;
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
+    var data = dataDeHoje();
     state.restaurandoFaixas = true;
     render();
-    fbDb.ref("lotes/" + chaveRota + "/faixas").once("value").then(function (snapshot) {
+    Promise.all([
+      fbDb.ref("lotes/" + chaveRota + "/faixas").once("value"),
+      fbDb.ref("lotes/" + chaveRota + "/lista/" + data).once("value")
+    ]).then(function (snapshots) {
       state.restaurandoFaixas = false;
-      var remoto = snapshot.val();
-      var ruasRemotas = (remoto && remoto.ruas && remoto.ruas.length) ? remoto.ruas : null;
-      if (!ruasRemotas) {
-        alert("Ainda não tem nenhuma Faixa salva na nuvem pra essa rota.");
+      var remotoFaixas = snapshots[0].val();
+      var ruasRemotas = (remotoFaixas && remotoFaixas.ruas && remotoFaixas.ruas.length) ? remotoFaixas.ruas : null;
+      var remotoLista = snapshots[1].val();
+      var textoRemoto = (remotoLista && typeof remotoLista.texto === "string") ? remotoLista.texto : "";
+
+      if (!ruasRemotas && !textoRemoto.trim()) {
+        alert("Ainda não tem nada salvo na nuvem pra essa rota (nem Faixas, nem lista de hoje).");
         render();
         return;
       }
-      var aviso = "Isso substitui as ruas cadastradas NESTE aparelho pelas " + ruasRemotas.length + " que estão na nuvem pra essa rota. Continuar?";
+      var partes = [];
+      if (ruasRemotas) partes.push(ruasRemotas.length + " " + plural(ruasRemotas.length, "rua cadastrada", "ruas cadastradas"));
+      if (textoRemoto.trim()) partes.push("a lista de hoje");
+      var aviso = "Isso substitui, NESTE aparelho, " + partes.join(" e ") + " pelo que está na nuvem pra essa rota. Continuar?";
       if (!confirm(aviso)) { render(); return; }
-      state.mapaRuas = normalizarMapaRuas(ruasRemotas);
-      salvar("mapa-ruas", state.mapaRuas);
+
+      if (ruasRemotas) {
+        state.mapaRuas = normalizarMapaRuas(ruasRemotas);
+        salvar("mapa-ruas", state.mapaRuas);
+      }
+      if (textoRemoto.trim()) {
+        state.textoColado = textoRemoto;
+        state.linhasParseadas = parseLinhas(textoRemoto);
+        state.pacoteStatus = {};
+        salvarSessao();
+        recarregarProgressoDaRota(chaveRota, data);
+      }
       render();
     }).catch(function () {
       state.restaurandoFaixas = false;
@@ -2523,7 +2545,7 @@
     var sairRotaBtn = app.querySelector('[data-action="sair-rota"]');
     if (sairRotaBtn) sairRotaBtn.onclick = sairDaRota;
     var restaurarFaixasBtn = app.querySelector('[data-action="restaurar-faixas-nuvem"]');
-    if (restaurarFaixasBtn) restaurarFaixasBtn.onclick = restaurarFaixasDaNuvem;
+    if (restaurarFaixasBtn) restaurarFaixasBtn.onclick = restaurarDaNuvem;
     app.querySelectorAll('[data-action="del-rua"]').forEach(function (el) {
       el.onclick = function () { removerRua(el.getAttribute("data-id")); };
     });
