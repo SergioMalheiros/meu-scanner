@@ -165,7 +165,15 @@
     var n = parseInt(numero, 10);
     var numPad = isNaN(n) ? "999999" : String(n).padStart(6, "0");
     var ruaChave = normalizar(ruaNome).replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "");
-    return ruaChave + "_" + numPad;
+    // O sufixo preserva o que vem DEPOIS do número (a letra do "120A", o
+    // "S/N" inteiro). Sem ele, 120 e 120A viravam o mesmo endereço: a foto
+    // de fachada de um aparecia como se fosse do outro, o botão "Baixar" de
+    // um baixava a pasta do outro, e o modo "loja por loja" ligava nos dois
+    // juntos. O número continua no começo da chave, então a ordenação da
+    // lista (que é o motivo da chave existir) não muda.
+    var resto = normalizar(String(numero == null ? "" : numero)).replace(/[^a-z0-9]+/g, "");
+    var sufixo = isNaN(n) ? resto : resto.replace(String(n), "");
+    return ruaChave + "_" + numPad + (sufixo ? "-" + sufixo : "");
   }
   function comprimirImagem(file, maxLado, qualidade) {
     return new Promise(function (resolve, reject) {
@@ -291,6 +299,13 @@
     return maior;
   }
 
+  // DEVOLVE UMA PROMESSA de propósito: quem chama só pode considerar a foto
+  // "entregue" (e tirar ela da fila) depois que o Firebase CONFIRMAR a
+  // gravação. Antes isso era "mande e esqueça": o Cloudinary aceitava a foto,
+  // o item saía da fila na hora, e se o celular matasse o app antes do
+  // Firebase gravar (comum com a câmera aberta e sinal ruim), a foto ficava
+  // no Cloudinary sem nenhum registro apontando pra ela — não entrava no zip
+  // e não aparecia na tela. Ou seja: comprovante de entrega perdido.
   function gravarFotoNoFirebase(item, url) {
     if (item.tipo === "pacote") {
       var quemRecebeu = (state.entregaInfo[item.linhaId] && state.entregaInfo[item.linhaId].quemRecebeu) || item.quemRecebeuSnapshot || "";
@@ -299,44 +314,67 @@
       // pacotes com mais de 1 foto (pacote + fachada da loja, por exemplo)
       // enviam cada foto de forma independente, às vezes ao mesmo tempo.
       var campos = {
-        rua: item.rua, numero: item.numero, nome: item.nome || "", quemRecebeu: quemRecebeu,
+        rua: item.rua, numero: item.numero, nome: item.nome || "",
         chave: item.chave, ts: Date.now()
       };
+      // Só grava "quem recebeu" quando tem alguma coisa pra gravar. Antes ele
+      // ia sempre, inclusive vazio — e uma foto subindo logo depois do colega
+      // digitar o nome apagava o nome dele.
+      if (quemRecebeu) campos.quemRecebeu = quemRecebeu;
       campos["fotos/" + item.slotIdx] = url;
-      fbDb.ref("lotes/" + item.chaveRota + "/entregas/" + item.data + "/" + item.codigo).update(campos);
+      return fbDb.ref("lotes/" + item.chaveRota + "/entregas/" + item.data + "/" + item.codigo).update(campos);
     } else if (item.tipo === "fachada") {
       // Sem data no caminho de propósito: a fachada de um prédio não muda de
       // um dia pro outro, então fica registrada pra sempre (por rota +
       // endereço) e é reaproveitada automaticamente quando a rota se repete.
-      fbDb.ref("lotes/" + item.chaveRota + "/fachadas_permanentes/" + item.chave).set({
+      return fbDb.ref("lotes/" + item.chaveRota + "/fachadas_permanentes/" + item.chave).set({
         rua: item.rua, numero: item.numero, fotoFachadaUrl: url, ts: Date.now()
       });
     }
+    return Promise.resolve();
+  }
+
+  // Guarda a foto na fila de reenvio. Extraído porque agora TODA falha cai
+  // aqui — não só falta de conexão.
+  function guardarNaFila(item, blob) {
+    return blobParaBase64(blob).then(function (base64) {
+      removerDaFilaPorIdentidade(item);
+      item.id = idFila();
+      item.blobBase64 = base64;
+      item.criadoEm = Date.now();
+      state.filaPendente.push(item);
+      salvarFila();
+      render();
+    });
   }
 
   // Primeira tentativa de envio, logo depois de tirar a foto. Se falhar por
   // causa de conexão, guarda a foto (em base64) no localStorage pra tentar de
   // novo mais tarde, em vez de simplesmente perder ou travar o app.
   function processarEnvioFoto(item, blob) {
-    subirParaCloudinary(blob, item.pasta, item.nomeArquivo).then(function (url) {
-      gravarFotoNoFirebase(item, url);
+    // A foto entra na fila ANTES de tentar subir, e só sai de lá quando o
+    // Firebase confirmar. Assim, qualquer coisa que dê errado no meio (app
+    // fechado, celular sem bateria, sinal caindo bem na hora) deixa a foto
+    // guardada pra reenviar, em vez de sumir. É a fila que garante que a foto
+    // nunca se perde — e ela é o comprovante de entrega.
+    guardarNaFila(item, blob).then(function () {
+      return subirParaCloudinary(blob, item.pasta, item.nomeArquivo);
+    }).then(function (url) {
+      return gravarFotoNoFirebase(item, url);
+    }).then(function () {
+      // Confirmado dos dois lados: agora sim pode sair da fila.
+      state.filaPendente = state.filaPendente.filter(function (p) { return p.id !== item.id; });
+      salvarFila();
       render();
     }).catch(function (err) {
+      // Fica na fila e tenta de novo depois (quando a conexão voltar, ao
+      // reabrir o app, ou pelo botão "tentar agora"). Vale pra QUALQUER
+      // falha, inclusive o Cloudinary recusando por limite de envios —
+      // antes esse caso jogava a foto fora na hora, com um alerta.
       if (err && err.respostaInvalida) {
-        alert("O Cloudinary recusou o envio da foto (não parece falta de conexão, e sim algo de configuração). Me avisa com essa mensagem:\n\n" + err.message);
-        return;
+        state.avisoEnvio = "O Cloudinary recusou o envio agora (" + (err.message || "") .slice(0, 80) + "). A foto está guardada e vai ser reenviada — dá pra forçar no botão de pendentes.";
       }
-      blobParaBase64(blob).then(function (base64) {
-        removerDaFilaPorIdentidade(item);
-        item.id = idFila();
-        item.blobBase64 = base64;
-        item.criadoEm = Date.now();
-        state.filaPendente.push(item);
-        salvarFila();
-        render();
-      }).catch(function () {
-        alert("Não consegui enviar a foto nem guardar ela pra tentar depois. Tire de novo, se der.");
-      });
+      render();
     });
   }
 
@@ -359,7 +397,11 @@
       Promise.resolve().then(function () {
         return subirParaCloudinary(base64ParaBlob(item.blobBase64), item.pasta, item.nomeArquivo);
       }).then(function (url) {
-        gravarFotoNoFirebase(item, url);
+        // Espera o Firebase CONFIRMAR antes de tirar da fila. Sem esse await,
+        // uma gravação que ficasse só bufferizada (offline) sumia da fila
+        // como se tivesse dado certo, e a foto ficava órfã no Cloudinary.
+        return gravarFotoNoFirebase(item, url);
+      }).then(function () {
         state.filaPendente = state.filaPendente.filter(function (p) { return p.id !== item.id; });
         salvarFila();
       }).catch(function () {
@@ -485,7 +527,16 @@
     // cru quando ela ainda NÃO está (caixa cinza). Antes só considerava rua
     // cadastrada — resultado: em rua sem faixa, tocar em "Foto" não fazia
     // absolutamente nada, e não dava pra registrar a entrega daquele pacote.
-    var itensDoNumero = linhasDoEndereco(ruaNome, numero).filter(function (l) { return !!l.codigo; });
+    var todosDoNumero = linhasDoEndereco(ruaNome, numero);
+    var itensDoNumero = todosDoNumero.filter(function (l) { return !!l.codigo; });
+    // Sem código não dá pra guardar a foto (o código é o endereço dela no
+    // Firebase e o nome do arquivo dentro do zip). Antes o botão simplesmente
+    // não fazia nada quando a lista vinha sem a coluna de código — parecia
+    // app quebrado. Agora explica o que fazer.
+    if (!itensDoNumero.length && todosDoNumero.length) {
+      alert("Esses pacotes vieram na lista sem o código de rastreio, e é ele que identifica a foto na hora de dar baixa.\n\nCole a lista com as 4 colunas (rua, número, nome, código) pra poder fotografar.");
+      return;
+    }
     var itens = itensDoNumero.filter(function (l) {
       if (pacotePendenteFila(l.id)) return false;
       // Endereço com só 1 pacote: precisa poder reabrir mesmo se já tiver
@@ -496,7 +547,14 @@
       if (itensDoNumero.length === 1) return true;
       return !temFotoPacote(l.id);
     });
-    if (!itens.length) return;
+    if (!itens.length) {
+      // Chega aqui quando as fotos desses pacotes ainda estão na fila
+      // esperando internet: também era um botão mudo.
+      if (itensDoNumero.some(function (l) { return pacotePendenteFila(l.id); })) {
+        alert("A foto desse endereço já foi tirada e está guardada esperando internet pra subir.\n\nEla sobe sozinha quando o sinal voltar — dá pra forçar no aviso de pendentes lá em cima.");
+      }
+      return;
+    }
     definirFoco("endereco-" + chaveOrdenavel(ruaNome, numero));
     state.loteFoto = { tipo: "pacotes", ruaNome: ruaNome, numero: numero, itens: itens, fotos: [], statusCamera: "pedindo", erro: "" };
     render();
@@ -902,7 +960,31 @@
       if (partes.length < 2 || !partes[0] || !partes[1]) {
         return { id: "L" + idx + "-" + linha.length, erro: true, raw: linha };
       }
-      return { id: "L" + idx + "-" + partes[0] + "-" + partes[1] + "-" + idx, rua: partes[0], numero: partes[1], nome: partes[2] || "", codigo: (partes[3] || "").trim(), erro: false };
+      // Nome com vírgula ("Silva, Jr", "Comercial Ferreira, ME") empurrava
+      // todas as colunas: o app entendia "Jr" como o código do pacote, e
+      // aquele pacote nunca separava no bipe nem sincronizava com o colega.
+      // Agora o CÓDIGO é procurado pelo formato dele (15 dígitos) em
+      // qualquer coluna, e tudo que sobra entre o número e o código vira o
+      // nome — que é justamente onde a vírgula extra costuma estar.
+      var rua = partes[0];
+      var numero = partes[1];
+      var resto = partes.slice(2);
+      var idxCodigo = -1;
+      for (var i = resto.length - 1; i >= 0; i--) {
+        if (/^\d{15}$/.test(resto[i].replace(/\s+/g, ""))) { idxCodigo = i; break; }
+      }
+      var codigo, nome;
+      if (idxCodigo !== -1) {
+        codigo = resto[idxCodigo].replace(/\s+/g, "");
+        nome = resto.slice(0, idxCodigo).join(", ").trim();
+      } else {
+        // Nenhuma coluna com cara de código: mantém o comportamento antigo
+        // (3ª coluna = nome, 4ª = código), pra não mudar nada em lista que
+        // já funcionava, inclusive as que vêm sem código.
+        nome = resto[0] || "";
+        codigo = (resto[1] || "").trim();
+      }
+      return { id: "L" + idx + "-" + rua + "-" + numero + "-" + idx, rua: rua, numero: numero, nome: nome, codigo: codigo, erro: false };
     });
   }
   function plural(n, s, p) { return n === 1 ? s : p; }
@@ -920,6 +1002,10 @@
     paletaAberta: null,
     minhaRota: "",
     rotaConectada: false,
+    // null = ainda não sei (nada visto sobre a conexão); true/false = o
+    // Firebase disse. Usado pra não mentir "conectado" quando o sinal cai.
+    conexaoViva: null,
+    avisoEnvio: "",
     totalRotas: 0,
     entregaInfo: {},
     fachadaInfo: {},
@@ -1054,7 +1140,10 @@
     });
   }
   function salvarSessao() {
-    salvar("sessao-atual", { texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais });
+    // "dia" carimba de quando é essa sessão: sem ele, a lista de ontem
+    // voltava na tela hoje de manhã como se fosse a de hoje, com o contador
+    // de ontem junto.
+    salvar("sessao-atual", { dia: dataDeHoje(), texto: state.textoColado, linhas: state.linhasParseadas, pacoteStatus: state.pacoteStatus, enderecosIndividuais: state.enderecosIndividuais });
   }
 
   // Foco a restaurar depois de tirar uma foto. A câmera nativa do celular tira
@@ -1079,6 +1168,10 @@
   state.bipeAtivo = carregar("bipe-ativo", true);
   focoAncora = carregar("foco-ancora", null);
   var sess = carregar("sessao-atual", null);
+  // Sessão de outro dia não volta pra tela: o progresso dela é de outra
+  // lista. Sessão antiga (gravada antes deste carimbo existir) continua
+  // sendo aceita, pra ninguém perder o que está no meio agora.
+  if (sess && sess.dia && sess.dia !== dataDeHoje()) sess = null;
   if (sess) {
     state.textoColado = sess.texto || "";
     state.linhasParseadas = sess.linhas || null;
@@ -1164,7 +1257,22 @@
   }
 
   function organizarPacotes() {
-    state.linhasParseadas = parseLinhas(state.textoColado);
+    var linhasNovas = parseLinhas(state.textoColado);
+
+    // Organizar uma lista NOVA por cima de outra: as marcações da lista
+    // anterior não valem pra esta (são de outros pacotes), então o progresso
+    // local começa do zero — igual já acontece quando a lista chega pela
+    // nuvem. Sem isso, colar a lista de hoje por cima da de ontem trazia
+    // marcação fantasma pra tela e, no reload seguinte, o app ainda
+    // empurrava essas marcações fantasma pros celulares dos colegas.
+    var listaMudou = state.linhasParseadas &&
+      state.linhasParseadas.map(function (l) { return l.codigo; }).join("|") !== linhasNovas.map(function (l) { return l.codigo; }).join("|");
+    if (listaMudou) {
+      state.pacoteStatus = {};
+      state.entregaInfo = {};
+    }
+
+    state.linhasParseadas = linhasNovas;
     state.encontrados = {};
     salvarSessao();
     enviarListaParaNuvem();
@@ -1186,6 +1294,8 @@
   var callbackFaixasAtual = null;
   var refListaAtual = null;
   var callbackListaAtual = null;
+  var refConectado = null;
+  var callbackConectado = null;
 
   function desconectarRota() {
     if (refPacotesAtual && callbackPacotesAtual) refPacotesAtual.off("value", callbackPacotesAtual);
@@ -1193,6 +1303,9 @@
     if (refFachadasAtual && callbackFachadasAtual) refFachadasAtual.off("value", callbackFachadasAtual);
     if (refFaixasAtual && callbackFaixasAtual) refFaixasAtual.off("value", callbackFaixasAtual);
     if (refListaAtual && callbackListaAtual) refListaAtual.off("value", callbackListaAtual);
+    if (refConectado && callbackConectado) refConectado.off("value", callbackConectado);
+    refConectado = null; callbackConectado = null;
+    state.conexaoViva = null;
     refPacotesAtual = null; callbackPacotesAtual = null;
     refEntregasAtual = null; callbackEntregasAtual = null;
     refFachadasAtual = null; callbackFachadasAtual = null;
@@ -1227,6 +1340,32 @@
     state.rotaConectada = false;
     if (!fbDb || !rota) return;
     var chaveRota = sanitizarChaveFirebase(rota);
+
+    // "Conectado" verde só enquanto a conexão existe DE VERDADE. Antes ele
+    // acendia na primeira resposta e nunca mais apagava: sem sinal no
+    // subsolo do prédio, o app continuava dizendo "compartilhando com quem
+    // usar esse mesmo código" e o entregador achava que o colega estava
+    // vendo o trabalho dele. ".info/connected" é o próprio Firebase dizendo
+    // se o canal está de pé.
+    // Se por algum motivo esse caminho não responder (versão diferente do
+    // SDK, por exemplo), "conexaoViva" fica null e o app se comporta como
+    // antes — o indicador nunca fica preso em "sem sinal" por causa disso.
+    try {
+      if (!refConectado) {
+        refConectado = fbDb.ref(".info/connected");
+        callbackConectado = function (snap) {
+          var online = snap.val();
+          if (online === null || online === undefined) return;
+          var vivo = online === true;
+          if (state.conexaoViva !== vivo) {
+            state.conexaoViva = vivo;
+            render();
+          }
+        };
+        refConectado.on("value", callbackConectado);
+      }
+    } catch (e) { refConectado = null; callbackConectado = null; }
+
     fbDb.ref("rotas_registradas/" + chaveRota).set(Date.now());
     limparFotosAntigas(chaveRota);
 
@@ -1241,12 +1380,29 @@
         if (state.mapaRuas.length) enviarFaixasParaNuvem();
         return;
       }
-      // Este aparelho já tem faixas: a daqui manda, e nada é trocado sozinho.
-      if (state.mapaRuas.length) return;
+      var normalizadas = normalizarMapaRuas(ruasRemotas);
+
+      // Este aparelho já tem faixas configuradas. A regra continua sendo "o
+      // que está aqui manda" — nenhuma rua daqui é apagada nem tem a cor
+      // trocada pela nuvem. Mas rua que só existe lá agora ENTRA: antes ela
+      // era ignorada pra sempre, e os pacotes daquela rua ficavam na caixa
+      // cinza no celular dos colegas enquanto apareciam coloridos no de quem
+      // cadastrou — num sistema onde a separação é por cor, cada celular
+      // mostrando uma coisa é problema de verdade no galpão.
+      if (state.mapaRuas.length) {
+        var jaTenho = {};
+        state.mapaRuas.forEach(function (r) { jaTenho[normalizar(r.nome)] = true; });
+        var novas = normalizadas.filter(function (r) { return !jaTenho[normalizar(r.nome)]; });
+        if (!novas.length) return;
+        state.mapaRuas = state.mapaRuas.concat(novas);
+        salvar("mapa-ruas", state.mapaRuas);
+        render();
+        return;
+      }
       // Aparelho sem nada configurado: restaura da nuvem, porque não há o que
       // perder aqui (celular novo, navegador limpo, ou colega entrando na
       // rota pela primeira vez).
-      state.mapaRuas = normalizarMapaRuas(ruasRemotas);
+      state.mapaRuas = normalizadas;
       salvar("mapa-ruas", state.mapaRuas);
       render();
     };
@@ -1259,14 +1415,42 @@
       var novo = {};
       Object.keys(dados).forEach(function (codigo) {
         var item = dados[codigo];
-        var linha = state.linhasParseadas && state.linhasParseadas.find(function (l) { return l.codigo === codigo; });
-        if (!linha) return;
+        // TODAS as linhas com esse código, não só a primeira: numa lista com
+        // código repetido, a segunda encomenda nunca mostrava o "✓ Foto" e o
+        // app achava que ela estava sem foto (a foto nova ia pro mesmo slot e
+        // sobrescrevia a anterior).
+        var linhas = (state.linhasParseadas || []).filter(function (l) { return !l.erro && l.codigo === codigo; });
+        if (!linhas.length) return;
         // Compatibilidade com fotos tiradas antes dessa atualização (campo
         // antigo "fotoPacoteUrl", uma foto só) — trata como se fosse a foto
         // do slot 0, assim nada some pra quem já tinha tirado foto hoje.
         var fotos = item.fotos || (item.fotoPacoteUrl ? { "0": item.fotoPacoteUrl } : {});
-        novo[linha.id] = { quemRecebeu: item.quemRecebeu || "", fotos: fotos };
+        linhas.forEach(function (linha) {
+          novo[linha.id] = { quemRecebeu: item.quemRecebeu || "", fotos: fotos };
+        });
       });
+      // O que a pessoa está digitando AGORA vale mais que o que veio da
+      // nuvem. Sem isso, uma foto subindo (a sua ou a do colega) trocava o
+      // objeto inteiro e apagava o nome de quem recebeu no meio da digitação
+      // — e como o campo focado é destruído pelo render, o "onblur" nunca
+      // rodava e o nome não chegava nem no Firebase. Sumia sem rastro.
+      var editando = document.activeElement;
+      if (editando && editando.tagName === "INPUT" && editando.getAttribute("data-action") &&
+          editando.getAttribute("data-action").indexOf("quem-recebeu") === 0) {
+        var idEditando = editando.getAttribute("data-id");
+        if (idEditando && novo[idEditando]) {
+          novo[idEditando].quemRecebeu = editando.value;
+        } else if (!idEditando) {
+          // campo do endereço inteiro: preserva em todas as linhas daquele nº
+          var ruaEd = editando.getAttribute("data-rua");
+          var numEd = editando.getAttribute("data-numero");
+          if (ruaEd != null && numEd != null) {
+            linhasDoEndereco(ruaEd, numEd).forEach(function (l) {
+              if (novo[l.id]) novo[l.id].quemRecebeu = editando.value;
+            });
+          }
+        }
+      }
       state.entregaInfo = novo;
       render();
     };
@@ -1301,10 +1485,27 @@
         porCodigo[l.codigo].push(l.id);
       });
       var mudou = false;
+      var hojeStr = dataDeHoje();
       Object.keys(dados).forEach(function (codigo) {
         var idsDoCodigo = porCodigo[codigo];
         if (!idsDoCodigo || !idsDoCodigo.length) return;
         var remoto = dados[codigo] || {};
+        // Marcação de OUTRO dia não vale pra lista de hoje. É isso que impede
+        // um ensaio na véspera (ou a entrega anterior do mesmo código, em
+        // reentrega) de abrir a lista de hoje com pacotes já marcados como
+        // separados, sem ninguém ter tocado neles.
+        // Registro SEM o carimbo "dia" pode ser de duas origens: um colega
+        // ainda com a versão anterior do app (aí é trabalho de verdade,
+        // acontecendo agora, e tem que valer) ou sobra de outro dia. O "ts"
+        // desempata: sem carimbo, só vale se for de hoje pelo relógio.
+        if (remoto.dia) {
+          if (remoto.dia !== hojeStr) return;
+        } else {
+          var tsRemoto = typeof remoto.ts === "number" ? remoto.ts : 0;
+          if (!tsRemoto) return;
+          var inicioDeHoje = new Date(); inicioDeHoje.setHours(0, 0, 0, 0);
+          if (tsRemoto < inicioDeHoje.getTime()) return;
+        }
         var novo = { separado: !!remoto.separado, entregue: !!remoto.entregue, devolvido: !!remoto.devolvido };
         // Código único (o caso normal): sempre foi só 1 id, comportamento
         // idêntico ao de antes. Código repetido: se alguma das linhas já
@@ -1327,10 +1528,13 @@
           if (l.erro || !l.codigo) return;
           var localSt = state.pacoteStatus[l.id];
           if (!localSt) return;
-          var remotoSt = dados[l.codigo] || {};
+          // Só compara com registro do MESMO dia — de outro dia é como se não
+          // existisse (mesma regra da leitura acima).
+          var remotoSt = (dados[l.codigo] && dados[l.codigo].dia === hojeStr) ? dados[l.codigo] : {};
           var atrasado = (localSt.separado && !remotoSt.separado) || (localSt.entregue && !remotoSt.entregue) || (localSt.devolvido && !remotoSt.devolvido);
           if (atrasado) fbDb.ref("lotes/" + chaveRota + "/pacotes/" + l.codigo).set({
-            separado: !!localSt.separado, entregue: !!localSt.entregue, devolvido: !!localSt.devolvido, ts: Date.now()
+            separado: !!localSt.separado, entregue: !!localSt.entregue, devolvido: !!localSt.devolvido,
+            ts: Date.now(), dia: hojeStr
           });
         });
         limparPacotesAntigos(chaveRota, dados);
@@ -1352,6 +1556,31 @@
       // Já é exatamente essa lista: nada a fazer (evita re-render à toa e
       // volta-e-meia depois do próprio envio).
       if (texto === state.textoColado && state.linhasParseadas) return;
+
+      // Este aparelho JÁ está trabalhando numa lista e chegou outra da nuvem
+      // (um colega organizou "a parte dele", que é o instinto natural quando
+      // são três dividindo a rota). Antes a tela trocava sozinha, zerando o
+      // progresso à vista, sem uma palavra — e o pessoal só via os pacotes
+      // sumirem. Agora quem está trabalhando decide.
+      if (state.linhasParseadas && state.linhasParseadas.length) {
+        var qtdAtual = state.linhasParseadas.length;
+        var qtdNova = parseLinhas(texto).length;
+        var separadosAqui = 0;
+        state.linhasParseadas.forEach(function (l) { if (statusDe(l.id).separado) separadosAqui++; });
+        var trocar = confirm(
+          "Um colega organizou uma lista diferente nesta rota.\n\n" +
+          "A sua tem " + qtdAtual + " " + plural(qtdAtual, "pacote", "pacotes") + " (" + separadosAqui + " já " + plural(separadosAqui, "separado", "separados") + ").\n" +
+          "A dele tem " + qtdNova + " " + plural(qtdNova, "pacote", "pacotes") + ".\n\n" +
+          "Trocar pela lista dele? (Se você está no meio da separação, escolha Cancelar e combine com ele quem cola a lista.)"
+        );
+        if (!trocar) {
+          // Fica com a lista daqui e devolve ela pra nuvem, pra não ficar
+          // um aparelho de cada jeito.
+          enviarListaParaNuvem();
+          return;
+        }
+      }
+
       state.textoColado = texto;
       state.linhasParseadas = parseLinhas(texto);
       // Zera o progresso local antes de reaplicar o da nuvem: se este
@@ -1403,8 +1632,15 @@
     var st = state.pacoteStatus[id] || {};
     // O "ts" é o que permite saber, depois, de que dia é cada marcação — sem
     // ele não dava pra limpar o nó "pacotes" (ver limparPacotesAntigos).
+    // O "dia" é o carimbo do DIA da separação: o nó "pacotes" é guardado por
+    // código, sem data no caminho, então sem esse carimbo a marcação de um
+    // ensaio (ou de uma entrega anterior do mesmo código, o que é comum em
+    // reentrega) voltava aplicada numa lista de outro dia, como se alguém já
+    // tivesse separado o pacote. Ver callbackPacotesAtual, que ignora
+    // marcação de dia diferente.
     fbDb.ref("lotes/" + chaveRota + "/pacotes/" + linha.codigo).set({
-      separado: !!st.separado, entregue: !!st.entregue, devolvido: !!st.devolvido, ts: Date.now()
+      separado: !!st.separado, entregue: !!st.entregue, devolvido: !!st.devolvido,
+      ts: Date.now(), dia: dataDeHoje()
     });
   }
 
@@ -1487,7 +1723,27 @@
     var aviso = "Limpar a lista de hoje e começar um novo dia?";
     if (fbDb && state.minhaRota) aviso += "\n\nA lista compartilhada da rota " + state.minhaRota + " também sai — quem já está com ela aberta continua trabalhando normal.";
     if (!confirm(aviso)) return;
+
+    // Apaga também as MARCAÇÕES desses pacotes na nuvem. Sem isso, elas
+    // ficavam guardadas por código (sem data nenhuma) e a limpeza automática
+    // de 2 dias nunca chegava nelas — então recolar a mesma lista (um ensaio
+    // na véspera, uma reentrega no dia seguinte) trazia tudo de volta já
+    // marcado como separado, sem ninguém ter tocado. "Começar um novo dia"
+    // agora começa mesmo do zero.
+    if (fbDb && state.minhaRota && state.linhasParseadas) {
+      var chaveRotaLimpar = sanitizarChaveFirebase(state.minhaRota);
+      var apagar = {};
+      var qtd = 0;
+      state.linhasParseadas.forEach(function (l) {
+        if (l.erro || !l.codigo) return;
+        apagar[l.codigo] = null;
+        qtd++;
+      });
+      if (qtd) fbDb.ref("lotes/" + chaveRotaLimpar + "/pacotes").update(apagar).catch(function () {});
+    }
+
     state.textoColado = ""; state.linhasParseadas = null; state.pacoteStatus = {};
+    state.entregaInfo = {};
     salvarSessao();
     removerListaDaNuvem();
     render();
@@ -1570,9 +1826,33 @@
   // que a 02 e entrou antes dela no arquivo, quando cada foto entrava assim
   // que terminava de baixar).
   function gerarEBaixarZip(itensParaBuscar, nomeArquivoZip, aoTerminar) {
+    // Tenta 3 vezes cada foto antes de desistir dela: uma piscada de rede na
+    // hora do download tirava a foto do zip caladamente, e é justamente no
+    // zip que a foto vira baixa no app da J&T.
+    function baixarComTentativas(url, tentativa) {
+      return fetch(url).then(function (r) {
+        if (!r.ok) throw new Error("http " + r.status);
+        return r.blob();
+      }).catch(function (e) {
+        if (tentativa >= 3) return null;
+        return new Promise(function (res) { setTimeout(res, 400 * tentativa); })
+          .then(function () { return baixarComTentativas(url, tentativa + 1); });
+      });
+    }
     Promise.all(itensParaBuscar.map(function (it) {
-      return fetch(it.url).then(function (r) { return r.blob(); }).catch(function () { return null; });
+      return baixarComTentativas(it.url, 1);
     })).then(function (blobs) {
+      // Se mesmo assim alguma faltou, o entregador PRECISA saber antes de dar
+      // baixa — antes o zip saía incompleto sem uma palavra.
+      var faltaram = [];
+      itensParaBuscar.forEach(function (it, i) { if (!blobs[i]) faltaram.push(it.nomePasta + "/" + it.nomeArquivo); });
+      if (faltaram.length) {
+        alert("Atenção: " + faltaram.length + " " + plural(faltaram.length, "foto não entrou", "fotos não entraram") + " no zip (não consegui baixar do servidor de fotos).\n\n" +
+          faltaram.slice(0, 8).join("\n") + (faltaram.length > 8 ? "\n..." : "") +
+          "\n\nConfira essas antes de dar baixa, e tente baixar o zip de novo daqui a pouco.");
+      }
+      return blobs;
+    }).then(function (blobs) {
       var zip = new JSZip();
       // O Google Fotos não agrupa "por nome" — ele ordena os álbuns/pastas
       // pela data da foto mais recente ali dentro, e as fotos daqui não
@@ -1600,8 +1880,19 @@
     });
   }
 
+  // Foto que ainda está na fila de reenvio NÃO está no Firebase, logo não
+  // entra no zip. Baixar sem saber disso é dar baixa com comprovante
+  // faltando — por isso avisa e deixa escolher.
+  function confirmarPendentesAntesDoZip() {
+    if (!state.filaPendente.length) return true;
+    return confirm("Ainda " + (state.filaPendente.length === 1 ? "tem 1 foto que não subiu" : "tem " + state.filaPendente.length + " fotos que não subiram") + " — " +
+      (state.filaPendente.length === 1 ? "ela não vai" : "elas não vão") + " entrar neste zip.\n\n" +
+      "O melhor é tocar em \"tentar agora\" no aviso de pendentes e esperar zerar.\n\nBaixar assim mesmo?");
+  }
+
   function baixarFotosDoDia() {
     if (!fbDb || !state.minhaRota || typeof JSZip === "undefined" || state.baixandoZip) return;
+    if (!confirmarPendentesAntesDoZip()) return;
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
     var data = dataDeHoje();
     state.baixandoZip = true;
@@ -1650,6 +1941,7 @@
   // mais de uma pasta no mesmo zip.
   function baixarFotosDoEndereco(chaveEndereco) {
     if (!fbDb || !state.minhaRota || typeof JSZip === "undefined" || state.baixandoZip) return;
+    if (!confirmarPendentesAntesDoZip()) return;
     var chaveRota = sanitizarChaveFirebase(state.minhaRota);
     var data = dataDeHoje();
     state.baixandoZip = true;
@@ -1705,7 +1997,21 @@
         porGrupo[keySem].itens.push(l);
         return;
       }
+      // classificar() devolve null quando o número não começa com dígito
+      // ("S/N", "KM 5", "LOTE 2", "Bloco B"...). Isso é comum em endereço
+      // brasileiro de verdade, e antes derrubava a aba Hoje INTEIRA: uma
+      // linha assim numa rua cadastrada estourava aqui, a tela parava de
+      // montar e nem mensagem de erro aparecia — no aparelho de quem colou e
+      // no de todo mundo que recebia a lista pela nuvem. Agora esses pacotes
+      // caem na mesma caixa cinza dos de rua sem faixa: aparecem, dá pra
+      // separar e fotografar, e entram na conta certinho.
       var c = classificar(l.numero, ruaMatch, splits);
+      if (!c) {
+        var keySemNum = "SEMNUMERO|" + ruaMatch.id;
+        if (!porGrupo[keySemNum]) porGrupo[keySemNum] = { ruaNome: ruaMatch.nome, label: "SEM Nº", cor: COR_SEM_FAIXA, itens: [], semFaixa: true };
+        porGrupo[keySemNum].itens.push(l);
+        return;
+      }
       var key = ruaMatch.id + "|" + c.cor;
       if (!porGrupo[key]) porGrupo[key] = { ruaNome: ruaMatch.nome, label: c.label, cor: c.cor, itens: [] };
       porGrupo[key].itens.push(l);
@@ -1719,8 +2025,11 @@
       // as caixas "sem faixa" ficam sempre no fim, pra não atrapalhar quem
       // está separando pelas cores.
       if (a.semFaixa !== b.semFaixa) return a.semFaixa ? 1 : -1;
-      var rc = a.ruaNome.localeCompare(b.ruaNome, "pt-BR");
-      return rc !== 0 ? rc : a.cor.localeCompare(b.cor);
+      var rc = String(a.ruaNome || "").localeCompare(String(b.ruaNome || ""), "pt-BR");
+      // String(... || "") em vez de usar direto: uma configuração de faixa
+      // antiga/incompleta (cor faltando) estourava aqui e derrubava a tela
+      // pelo mesmo caminho do "S/N".
+      return rc !== 0 ? rc : String(a.cor || "").localeCompare(String(b.cor || ""));
     });
 
     // Código repetido em mais de uma linha (às vezes a própria lista vem
@@ -1773,6 +2082,16 @@
   // do usuário. Um dos dois pode desligar sozinho no aparelho dele, sem
   // afetar o outro (fica salvo só localmente, não é uma config da rota).
   var audioCtxBipe = null;
+  // Cria e destrava o áudio a partir de um TOQUE de verdade (abrir a câmera,
+  // ligar o bipe). No iPhone, um AudioContext criado dentro de um retorno da
+  // câmera nasce "suspended" e nunca mais toca — o operador achava que o app
+  // não tinha lido. Chamando daqui, o navegador aceita.
+  function prepararAudioBipe() {
+    try {
+      if (!audioCtxBipe) audioCtxBipe = new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtxBipe.state === "suspended") audioCtxBipe.resume();
+    } catch (e) { /* aparelho sem suporte a áudio — segue sem bipe */ }
+  }
   function tocarBipeSucesso() {
     if (!state.bipeAtivo) return;
     try {
@@ -1797,6 +2116,7 @@
   function alternarBipe() {
     state.bipeAtivo = !state.bipeAtivo;
     salvar("bipe-ativo", state.bipeAtivo);
+    if (state.bipeAtivo) { prepararAudioBipe(); tocarBipeSucesso(); }
     render();
   }
 
@@ -1875,7 +2195,21 @@
     // separados — as 2 encomendas com código repetido escaneadas em
     // sequência rápida perdiam a segunda pra esse filtro).
     if (ultimoScan.chave === linha.id && agora - ultimoScan.ts < 2500) return;
-    ultimoScan = { chave: linha.id, ts: agora };
+
+    // Segunda trava, pro caso inverso do de cima. Com código repetido na
+    // lista, a MESMA etiqueta parada na frente da câmera é lida em vários
+    // quadros seguidos (a cada ~16ms no Android); como a 1ª linha já ficou
+    // separada, o quadro seguinte resolvia pra OUTRA linha e marcava ela
+    // também — um pacote na mão, dois bipes e +2 no contador.
+    // O que separa "a mesma etiqueta de novo" de "a próxima encomenda com o
+    // mesmo código" não é o relógio, é o INTERVALO ENTRE QUADROS: a câmera
+    // vendo a mesma etiqueta entrega leituras coladas (dezenas por segundo),
+    // enquanto trocar de pacote na mão leva pelo menos uns 300ms. Por isso a
+    // janela aqui é bem curta — o suficiente pros quadros repetidos, e longe
+    // do tempo de passar a próxima encomenda (que continua separando normal,
+    // que foi o conserto do "100 escaneados, 97 separados").
+    if (ultimoScan.codigoBruto === codigo && agora - ultimoScan.ts < 250) return;
+    ultimoScan = { chave: linha.id, codigoBruto: codigo, ts: agora };
 
     var ruaMatch = encontrarRuaMapeada(linha.rua, state.mapaRuas);
     var classificacao = ruaMatch ? classificar(linha.numero, ruaMatch, calcularSplitsPorRua()) : null;
@@ -1973,6 +2307,9 @@
     // Mesma ideia da câmera em lote: solta qualquer câmera presa antes de
     // pedir esta, pra não disputar o hardware com uma câmera que ficou aberta.
     if (streamLote) pararCameraLote();
+    // Toque de verdade do usuário: é a hora certa de destravar o áudio do
+    // bipe (ver prepararAudioBipe).
+    prepararAudioBipe();
     state.statusCamera = "pedindo"; state.erroCamera = ""; state.resultadoScan = null; render();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       state.statusCamera = "erro"; state.erroCamera = "esse navegador não expõe acesso à câmera aqui."; render(); return;
@@ -2029,6 +2366,12 @@
       if (streamAtual) pararCamera();
       state.resultadoScan = null;
       state.flashScan = null;
+      // Sair e voltar pra aba da câmera devolve o botão "iniciar câmera" em
+      // vez de manter a caixa de erro da tentativa anterior na tela.
+      if (state.statusCamera === "erro" || state.statusCamera === "sem-suporte") {
+        state.statusCamera = "idle";
+        state.erroCamera = "";
+      }
       if (flashTimeoutId) { clearTimeout(flashTimeoutId); flashTimeoutId = null; }
     }
     state.aba = a;
@@ -2056,7 +2399,12 @@
       '<p style="font-size:12px;opacity:.6;margin:2px 0 0">' + formatarNumero(state.contadorGlobal || 0) + " \u00b7 " +
       (contadorAtivo ? "Todos os pacotes processados no galp\u00e3o" : "Pacotes processados neste aparelho") +
       "</p>" +
+      // Sem sinal: dizer isso no topo, onde a pessoa olha, em vez de deixar
+      // ela achar que o colega est\u00e1 vendo o trabalho dela.
+      (state.rotaConectada && state.conexaoViva === false
+        ? '<p style="font-size:12px;margin:4px 0 0;color:var(--alert);font-weight:600">\u26a0\ufe0f sem sinal agora \u2014 o trabalho fica guardado aqui e sobe sozinho quando voltar</p>' : "") +
       (state.filaPendente.length > 0 ? '<p style="font-size:12px;margin:4px 0 0;color:var(--accent-deep);font-weight:600">\u23f3 ' + state.filaPendente.length + " " + plural(state.filaPendente.length, "foto pendente de envio", "fotos pendentes de envio") + "</p>" : "") +
+      (state.avisoEnvio ? '<p style="font-size:12px;margin:4px 0 0;color:var(--alert);font-weight:600">' + esc(state.avisoEnvio) + "</p>" : "") +
       "</header>";
 
     html += '<div class="tabs">' +
@@ -2067,15 +2415,64 @@
       html += '<button class="btn-primary" data-action="limpar-sessao" style="background:transparent;border:1px solid var(--line);color:var(--ink);opacity:.7;margin:10px 0 14px">\u21bb Limpar e come\u00e7ar novo dia</button>';
     }
 
-    if (state.aba === "escanear") html += renderCamera();
-    else if (state.aba === "separar") html += renderSeparar();
-    else if (state.aba === "mapa") html += renderMapa();
+    // Se alguma coisa inesperada estourar montando a lista, a tela ANTIGA
+    // ficava congelada e nem mensagem aparecia — o app parecia morto e não
+    // tinha nem como apertar "Limpar". Agora o erro é contido: mostra o que
+    // aconteceu e um botão pra recomeçar, em vez de travar calado.
+    try {
+      if (state.aba === "escanear") html += renderCamera();
+      else if (state.aba === "separar") html += renderSeparar();
+      else if (state.aba === "mapa") html += renderMapa();
+    } catch (e) {
+      html += '<div class="warn-box" style="margin:14px 0"><p style="margin:0 0 8px;font-weight:600">Não consegui montar esta tela.</p>' +
+        '<p style="margin:0 0 10px;font-size:13px">Costuma ser alguma linha fora do padrão na lista de hoje. As outras abas continuam funcionando.</p>' +
+        '<p style="margin:0 0 10px;font-size:11px;font-family:ui-monospace,monospace;opacity:.7">' + esc(String(e && e.message ? e.message : e)) + '</p>' +
+        '<button class="btn-primary" data-action="limpar-sessao">↻ Limpar e começar novo dia</button></div>';
+    }
+
+    // Guarda o campo que está sendo digitado ANTES de refazer a tela: o
+    // innerHTML abaixo destrói o <input> focado, e com ele o texto que a
+    // pessoa estava digitando e a posição do cursor. Sem isso, qualquer
+    // novidade da nuvem (uma foto do colega, o contador global subindo)
+    // apagava o que estava sendo escrito e fechava o teclado no meio.
+    var ativo = document.activeElement;
+    var focoSalvo = null;
+    if (ativo && (ativo.tagName === "INPUT" || ativo.tagName === "TEXTAREA") && app.contains(ativo)) {
+      focoSalvo = {
+        id: ativo.id || null,
+        acao: ativo.getAttribute("data-action"),
+        idAlvo: ativo.getAttribute("data-id"),
+        rua: ativo.getAttribute("data-rua"),
+        numero: ativo.getAttribute("data-numero"),
+        valor: ativo.value,
+        inicio: ativo.selectionStart,
+        fim: ativo.selectionEnd
+      };
+    }
 
     html += renderVisualizadorFoto();
 
     app.innerHTML = html;
 
     attachHandlers();
+
+    if (focoSalvo) {
+      var alvo = null;
+      if (focoSalvo.id) alvo = document.getElementById(focoSalvo.id);
+      if (!alvo && focoSalvo.acao) {
+        var sel = '[data-action="' + focoSalvo.acao + '"]';
+        if (focoSalvo.idAlvo) sel += '[data-id="' + focoSalvo.idAlvo + '"]';
+        else if (focoSalvo.rua != null && focoSalvo.numero != null) sel += '[data-rua="' + focoSalvo.rua + '"][data-numero="' + focoSalvo.numero + '"]';
+        try { alvo = app.querySelector(sel); } catch (e) { alvo = null; }
+      }
+      if (alvo) {
+        // O que a pessoa digitou manda: se o valor remontado veio diferente
+        // (dado da nuvem chegando no meio da digitação), o texto dela volta.
+        if (alvo.value !== focoSalvo.valor) alvo.value = focoSalvo.valor;
+        alvo.focus();
+        try { alvo.setSelectionRange(focoSalvo.inicio, focoSalvo.fim); } catch (e) { /* input que não aceita seleção */ }
+      }
+    }
     if (state.aba === "escanear" && streamAtual) {
       var v2 = document.getElementById("video");
       if (v2 && v2.srcObject !== streamAtual) {
@@ -2305,9 +2702,17 @@
     } else if (state.statusCamera === "pedindo") {
       html += '<p class="muted" style="text-align:center;padding:16px 0">pedindo acesso \u00e0 c\u00e2mera...</p>';
     } else if (state.statusCamera === "erro") {
-      html += '<div class="warn-box">' + esc(state.erroCamera) + "</div>";
+      // O bot\u00e3o de tentar de novo \u00e9 o que faltava aqui: quem negava a
+      // permiss\u00e3o sem querer (ou tinha a c\u00e2mera presa em outro app) ficava
+      // preso nessa caixa vermelha pra sempre \u2014 trocar de aba e voltar n\u00e3o
+      // trazia o bot\u00e3o de volta, e instalado na tela inicial n\u00e3o tem nem
+      // barra de endere\u00e7o pra recarregar. A c\u00e2mera de foto j\u00e1 tinha esse
+      // bot\u00e3o; a de escanear n\u00e3o.
+      html += '<div class="warn-box">' + esc(state.erroCamera) + "</div>" +
+        '<button class="btn-primary" data-action="iniciar-camera" style="margin-top:8px">\u{1F4F7} Tentar de novo</button>';
     } else if (state.statusCamera === "sem-suporte") {
-      html += '<div class="warn-box">A c\u00e2mera ligou, mas esse navegador n\u00e3o tem leitor nativo de QR/c\u00f3digo de barras.</div>';
+      html += '<div class="warn-box">A c\u00e2mera ligou, mas esse navegador n\u00e3o tem leitor nativo de QR/c\u00f3digo de barras.</div>' +
+        '<button class="btn-primary" data-action="iniciar-camera" style="margin-top:8px">\u{1F4F7} Tentar de novo</button>';
     }
     // Aparelho sem leitor próprio (iPhone): avisa que está preparando o
     // leitor extra — é um download que acontece só na primeira vez.
@@ -2507,14 +2912,18 @@
   }
 
   function renderMapa() {
+    // Verde s\u00f3 quando a rota conectou E a conex\u00e3o est\u00e1 viva agora.
+    var conectadoAgora = state.rotaConectada && state.conexaoViva !== false;
     var statusTexto = !fbDb
       ? "sem conex\u00e3o com o Firebase \u2014 tudo funciona s\u00f3 neste aparelho."
       : !state.minhaRota
       ? "defina seu c\u00f3digo pra compartilhar o progresso com quem mais estiver nessa rota."
-      : state.rotaConectada
+      : conectadoAgora
       ? "conectado \u2014 compartilhando com quem usar esse mesmo c\u00f3digo."
+      : state.rotaConectada
+      ? "sem sinal agora \u2014 o que voc\u00ea marcar fica guardado e sobe quando a internet voltar."
       : "sem conex\u00e3o em tempo real agora (funcionando localmente).";
-    var statusCor = (fbDb && state.minhaRota && state.rotaConectada) ? "var(--ok)" : "var(--alert)";
+    var statusCor = (fbDb && state.minhaRota && conectadoAgora) ? "var(--ok)" : "var(--alert)";
 
     var html = '<div class="card" style="padding:12px;margin-bottom:16px">' +
       '<p style="font-size:11px;font-weight:600;margin:0 0 6px;opacity:.65">C\u00d3DIGO DA SUA ROTA</p>' +
